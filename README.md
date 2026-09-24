@@ -10,7 +10,29 @@
     <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-1E9BFA?style=flat-square">
     <img alt="Encoding" src="https://img.shields.io/badge/encoding-UTF--8-2EA44F?style=flat-square">
   </p>
+  <p><sub>个人修改版，来源于 <a href="https://github.com/Marchen-orz/MiyoQian">Marchen-orz/MiyoQian</a>；本仓库改了什么见「关于这个仓库」</sub></p>
 </div>
+
+> [!IMPORTANT]
+> **本仓库是 [Marchen-orz/MiyoQian](https://github.com/Marchen-orz/MiyoQian) 的衍生版本（个人修改版），不是原创项目。**
+>
+> - 原项目作者：**[@Marchen-orz](https://github.com/Marchen-orz)** —— 主要功能都是他写的，也由他在维护。
+> - **原项目地址：<https://github.com/Marchen-orz/MiyoQian>**
+>   想用原版、想提 Issue / PR、想给 Star，**都请去原仓库**。
+> - 本仓库只是在他的基础上按个人需要做了一些改动（清单见下），并会持续跟踪他的更新。
+
+## 关于这个仓库
+
+这是个人修改版，来源是 **[Marchen-orz/MiyoQian](https://github.com/Marchen-orz/MiyoQian)**：原项目已经很完整，这份是在它基础上按自己的使用习惯改的，比原版多出来的主要是这些：
+
+- **本地验证码识别** —— 用本机 Chrome + CDP + 一个轻量视觉模型直接解极验九宫格，不依赖第三方打码服务（网页上有「环境自检」按钮可先验证环境），打码狗作为备选。
+- **出口 IP 防护** —— IP 在境外时暂停签到，避免异地登录风控；抢购场景只会在开抢前做一次**非阻塞**检查，不占用开抢时间。
+- **风控节奏可调** —— 账号之间的随机间隔搬到网页上设置（单位分钟）；签到请求之间带 3~7 秒随机抖动，抢购路径不抖动（要快）。
+- **推送与调度的修复** —— 兑换推送字段转义、账号崩溃/被跳过/手动停止都能在推送里看见、校验推送服务的业务返回码（不再「HTTP 200 就是成功」）、正文长度上限、每日调度不再因配置写错而静默失效。
+- **测试** —— 200 个 Python 测试 + 5 个前端检查。
+
+> 原项目作者明确希望**不要在其他平台宣传、不要大范围传播**，本仓库同样遵循：请自己用，别拿去扩散。
+> 主要功能都是原作者的，用得上就去给[原项目](https://github.com/Marchen-orz/MiyoQian)点个 Star。
 
 ## 简介
 
@@ -18,24 +40,7 @@
 
 <img src="./assets/home.png" alt="demo" style="max-width:100%;border-radius:10px">
 
-### 请勿在其他平台宣传本项目，请不要大范围传播本项目！！！
-
-### 大怨种是谁呢
-
-太久没有玩米游了，回坑就做这个项目，要做完突然发现天塌了，米游社要更新米游币获取规则了，部分用户现在已经不能回帖点赞获取米游币了，不知道官方后续的新规是什么，赶上了好时候，卑微QWQ，不知道以后新的规则还能不能搞自动任务
-
-### 交流群
-如果你有兴趣参与开发，或者在使用过程中遇到问题，可以加入交流群：
-
-<p align="center">
-  <img src="./assets/QQ_qrcode.jpg" alt="QQ群" width="300">
-</p>
-
 ## 功能
-
-### 最新更新：支持云游戏签到（云原神、云绝区零）！！！
-### 最新更新：支持米游社商品兑换功能！！！
-### 重大更新：支持自动过验证码！！！
 
 - 米游社 APP 扫码登录
 - 多账号管理
@@ -43,6 +48,8 @@
 - 云游戏签到（云原神、云绝区零）
 - 米游币社区任务
 - 米游社商品兑换
+- **本地验证码识别**（不依赖第三方打码服务，见「验证码识别」一节）
+- **出口 IP 防护**（IP 在境外时暂停签到，见「IP 防护」一节）
 - 本地 Web 控制台
 - 每日自动执行
 - 执行结果推送
@@ -75,7 +82,7 @@
 
 云游戏 Token 获取方法（参考 MihoyoBBSTools）：
 
-1. 云绝区零无网页版需抓包获取，参考 https://bili33.top/posts/MHYY-AutoCheckin-Manual-Gen2/#%E9%85%8D%E7%BD%AE%E8%8E%B7%E5%8F%96；云原神在浏览器打开[对应云游戏网页](https://ys.mihoyo.com/cloud/#/)并登录账号。
+1. 在浏览器打开对应云游戏网页并登录账号，[云原神](https://ys.mihoyo.com/cloud/#/)，[云绝区零](https://zzz.mihoyo.com/cloud-feat/#/)。
 2. 打开开发者工具，切到 `Network` / `网络`。
 3. 刷新页面或进入钱包/时长页面，过滤 `wallet/wallet/get`。
 4. 点开返回成功的请求，在请求头里复制 `X-Rpc-Combo_token` 的值。
@@ -111,8 +118,27 @@ accounts:
 - **商品浏览**：支持按游戏分区浏览可兑换商品列表
 - **实时状态**：显示商品库存、兑换时间、限购情况等实时信息
 - **定时兑换**：支持设置兑换计划，到点自动兑换
-- **重试机制**：支持配置重试时长和间隔，提高兑换成功率
+- **重试机制**：抢到就停，没抢到就在设定时间内继续抢（可配置）
 - **多账号支持**：每个账号可配置独立的兑换计划
+
+### 自动兑换是怎么回事
+
+简单说：**到开卖那一刻，它会替你连着按"兑换"按钮，抢到就停，一直没抢到就坚持到你设定的秒数用完为止。**
+
+关键是两个设置（网页「自动兑换」面板里也能改）：
+
+| 设置 | 人话解释 |
+| --- | --- |
+| `retry_seconds`<br>（网页：最多抢几秒） | 开卖瞬间开始，**最多坚持多少秒**。抢到就提前结束；时间一到无论成败都停手。`0` = 只发一次请求，不重试。 |
+| `retry_interval`<br>（网页：最多隔几秒发一次） | 两次请求之间**最多隔多久**。实际是在 **0 ~ 这个数之间随机**（填 `0.3` 就是 0~0.3 秒随机），加随机是为了别让节奏太机械。填 `0` = 完全不等待。 |
+
+网页上会根据你填的数字实时估算大概发几次请求，例如「最多抢 5.5 秒 / 最多隔 0.3 秒」≈ 16 次（最少 11 次、最多 27 次）。
+
+哪些行为是安全的（不会重复下单）：
+
+- **同一个「商品 + 开卖时间」只会自动抢一次**，失败也不会自动再来一轮（想重来就把计划的开卖时间改一下，或手动点「立即兑换」）。
+- **抢到之后计划会自动关闭**，不会对着同一个商品反复下单。
+- 「启用商品自动兑换」这个开关**只管到点自动那条路**；商品卡片上的「立即兑换」不受它影响，手动随时能用。
 
 ### 配置说明
 
@@ -120,9 +146,10 @@ accounts:
 
 ```yaml
 shop_exchange:
-  enable: true          # 是否启用商品兑换功能
-  retry_seconds: 20     # 重试总时长（秒）
-  retry_interval: 0.4   # 重试间隔（秒）
+  enable: true          # 是否开启"到点自动抢"（关着也能手动兑换）
+  retry_seconds: 20     # 到点后最多抢几秒（0 = 只发一次）
+  retry_interval: 0.4   # 每两次之间最多隔几秒（实际 0~这个数 之间随机；0 = 不等）
+  push: true            # 兑换结束后是否推送结果
   plans: []             # 兑换计划列表
 ```
 
@@ -235,7 +262,7 @@ A: 可以，每个账号可以添加多个兑换计划，系统会按时间顺�
 
 ```bash
 git clone <你的仓库地址>
-cd 米游社签到
+cd MiyoQian
 ```
 
 #### 2. 构建并启动
@@ -243,14 +270,11 @@ cd 米游社签到
 ```bash
 # 进入 docker 目录
 cd docker
-
-# 构建并启动（后台运行）
 docker compose up -d --build
 ```
 
-启动成功后，通过端口映射从宿主机访问 `http://localhost:5890` 即可打开 Web 控制台。
+启动完成后，浏览器打开 **http://localhost:5890** 即可。
 
-> 容器首次启动时会自动从 `config.example.yaml` 生成 `config.yaml`，无需手动操作。
 > 容器内服务已默认监听 `0.0.0.0`（Docker 必需），宿主机通过 `localhost:5890` 访问即可。
 
 #### 3. 常用命令
@@ -261,10 +285,10 @@ cd docker
 # 查看日志
 docker compose logs -f
 
-# 停止服务
+# 停止并删除容器
 docker compose down
 
-# 重新构建（更新代码后）
+# 代码更新后重新构建
 docker compose up -d --build
 ```
 
@@ -278,57 +302,44 @@ docker compose up -d --build
 
 容器重建后数据不会丢失。只有执行 `docker compose down -v` 或手动删除该 Docker 卷时，Docker 环境内的配置和登录凭证才会被删除。
 
-如需查看或备份容器内配置，可以执行：
-
-```bash
-docker compose exec miyouqian sh
-ls -la /app/state
-```
-
 #### 注意事项
 
+- 首次使用需要先进容器完成扫码登录：`docker compose exec miyouqian sh`
 - 容器内时区默认为 `Asia/Shanghai`，如需修改可在 `docker-compose.yml` 中调整 `TZ` 环境变量
-- 默认映射到宿主机所有网卡的 `5890` 端口，局域网或公网访问还需要在宿主机层面配置防火墙、安全组、端口转发或反向代理
 - 如需修改容器内监听端口，同时修改 `docker-compose.yml` 的 `ports` 和 Docker 启动命令中的 `--port`
-- 公网访问时请务必设置 Web 控制台密码，首次访问页面会引导设置密码
-
----
 
 ### GitHub Actions 定时签到（无需服务器）
 
 适合不想长期运行电脑、服务器或 NAS 的用户。Actions 会按 `.github/workflows/checkin.yml` 里的时间自动执行一次 `python main.py run`。
 
-> ⚠️ **必须使用 "Use this template" 创建项目，不要使用 Fork！**
+> ⚠️ 想用 Actions 的话，**不要直接 Fork**，请点 **Use this template** → **Create a new repository**
+> 创建到你自己的账号下，否则运行时长会算到上游仓库，可能连累它被封禁。
 >
-> Fork 仓库的 Actions 运行时长会统计到上游（原）仓库，会导致上游仓库因超出时长限制而被封禁。
-> 请点击仓库右上角的 **`Use this template`** -> **`Create a new repository`**，将项目创建到你自己的 GitHub 账号下。
->
-> GitHub Actions 只负责定时触发一次性签到，不会启动 Web 控制台。首次扫码登录和配置调整建议先在本地或 Docker 环境完成。
+> （本仓库本身就是上游的 fork，**fork 上的 Actions 默认是关闭的**；要用得自己去 `Actions`
+> 页面手动启用，时长算在你自己的额度里。）
+
+> ⚠️ GitHub Actions 只负责定时触发一次性签到，不会启动 Web 控制台。首次扫码登录和配置调整建议先在本地或 Docker 环境完成。
 
 #### 1. 本地生成配置和凭证
 
-先按“本地部署”或“Docker 部署”完成一次扫码登录，并确认手动执行签到正常。完成后项目目录里会有：
+先按「本地部署」或「Docker 部署」完成一次扫码登录，并确认手动执行签到正常。完成后项目目录里会有：
 
 | 文件 | 说明 |
 | --- | --- |
-| `config.yaml` | 公开配置，不建议直接提交仓库 |
-| `data/credentials.yaml` | 登录凭证，敏感信息，绝对不要提交仓库 |
+| `config.yaml` | 任务配置，可以提交仓库 |
+| `data/credentials.yaml` | 登录凭证（含账号信息），不要提交仓库 |
 
 #### 2. 创建项目并启用 Actions
 
-点击本仓库右上角的 `Use this template` -> `Create a new repository`，将项目创建到你自己的 GitHub 账号下。
+点仓库右上角的 `Use this template` → `Create a new repository`，把项目创建到你自己的 GitHub 账号下。
 
-进入你创建的新仓库后，打开 `Actions` 页面。如果页面提示 workflow 被禁用，点击启用。
+进入你创建的新仓库后，打开 `Actions` 页面。如果页面提示 workflow 被禁用，点一下启用。
 
-开启 Actions 后无论配置 secrets 与否都会每天执行一次。不要在原项目仓库里配置你的账号凭证，也不要把凭证发给项目作者。
+开启 Actions 后，无论有没有配置 Secrets 都会每天执行一次。**不要在原项目仓库里配置你的账号凭证**，也不要把凭证发给项目作者。
 
 #### 3. 添加 GitHub Secrets
 
-进入你创建的仓库：
-
-```text
-Settings -> Secrets and variables -> Actions -> New repository secret
-```
+进入你创建的新仓库：`Settings` → `Secrets and variables` → `Actions` → `New repository secret`。
 
 添加两个 Secret：
 
@@ -367,19 +378,9 @@ schedule:
 
 #### 5. 手动执行一次
 
-进入你创建的仓库的 `Actions` 页面，选择 `米游签定时签到`，点击 `Run workflow`：
+进入你创建的仓库的 `Actions` 页面，选择 `米游签定时签到`，点击 `Run workflow` → `Run workflow`。
 
-`执行模式` 用来决定这一次手动运行要跑哪些任务：
-
-| 选项 | 说明 |
-| --- | --- |
-| `全部任务` | 默认选项，按 `config.yaml` 中的开关执行游戏社区签到、云游戏签到和米游币社区任务 |
-| `只执行游戏社区/云游戏签到` | 只跑游戏社区签到和云游戏签到，跳过米游币社区任务 |
-| `只执行米游币社区任务` | 只跑社区签到、看帖、点赞、分享等米游币任务，跳过游戏社区签到和云游戏签到 |
-
-`account` 是可选项，用来只执行某一个账号名；留空则执行 `config.yaml` 中的全部账号。
-
-执行完成后可以在 Actions 日志底部查看任务摘要。如果配置了推送渠道，执行结果也会按 `config.yaml` 中的推送配置发送。
+等 1~2 分钟，在日志底部可以看到任务摘要（执行结果也会按 `config.yaml` 里的推送配置发出）。
 
 #### 注意事项
 
@@ -388,6 +389,7 @@ schedule:
 - GitHub Actions 的定时任务可能会因平台负载延迟几分钟
 - 公开仓库如果长期没有活动，GitHub 可能会自动停用定时 workflow
 - `config.yaml` 里的 `schedule` 配置不会影响 Actions 定时，Actions 的执行时间以 `.github/workflows/checkin.yml` 为准
+- 多账号场景下账号之间会随机等 1~2 小时（防风控），所以 workflow 的超时设成了 350 分钟；只跑一个账号可以把 `timeout-minutes` 改小
 
 ---
 
@@ -603,6 +605,49 @@ http://127.0.0.1:5890
 
 自动执行要求程序保持运行。关闭终端、电脑关机或休眠后，任务不会继续执行，所以推荐服务器上运行。
 
+## IP 防护（境外 IP 时暂停签到）
+
+开着 VPN / 代理签到，出口 IP 会跑到境外或异地，很容易触发米游社风控。开启 IP 防护后，每个账号签到前都会先查一次公网出口 IP：
+
+- 出口 IP 在中国大陆 → 正常签到
+- 出口 IP 不在中国大陆 → **暂停签到**，每隔一段时间复查，IP 回到大陆后自动继续
+- 超过最长等待时间仍未恢复 → 放弃本次，并推送通知
+
+```yaml
+ip_guard:
+  enable: true             # 关闭后不再检查
+  check_interval: 300      # 复查间隔（秒）
+  max_wait: 7200           # 最长等待（秒），0 = 一直等
+  notify: true             # 暂停 / 恢复 / 放弃时推送通知
+  on_error: allow          # 查询失败时放行(allow) 还是按境外处理(block)
+  endpoints: []            # 可选：自定义查询接口，留空用内置接口
+```
+
+说明：
+
+| 设置 | 说明 |
+| --- | --- |
+| `check_interval` | 暂停后每隔多久复查一次出口 IP，最小 30 秒 |
+| `max_wait` | 累计等待超过这个时长就放弃本次签到，`0` 表示不限时长一直等 |
+| `notify` | 暂停、恢复、放弃时各推送一次通知（仍需先配置推送通道） |
+| `on_error` | 查询接口全部不可用时怎么办：`allow` 放行继续签到，`block` 当作境外处理 |
+| `endpoints` | 自定义查询接口，只要响应里包含 IP 即可，最多 5 个 |
+
+判定依据：**同时探测两条链路**，任意一条出口在境外都会暂停。
+
+| 链路 | 探测接口 | 说明 |
+| --- | --- | --- |
+| 国内直连 | ipip.net / 3322 / 淘宝 | 代理规则里多是中国大陆直连 |
+| 境外流量 | ipify / ipinfo / myip | 米游社是境外服务，走的是这条路 |
+
+为什么要分开查：**分流模式（规则模式）的代理下，国内直连、国外走代理，两边看到的出口 IP 不一样**。如果只查国内接口，会看到江苏的 IP 以为一切正常，但米游社实际是从香港出去的，一样会触发风控。分开探测后这种「假正常」能被识别出来。
+
+**中国香港、中国澳门、中国台湾的网络出口与海外一样不算中国大陆**，同样会暂停。
+
+Web 控制台的「IP 防护」面板可以开关、调整间隔、点「立即检测出口 IP」当场看两条链路的结果。
+
+> 注意：判定依赖第三方查询接口。接口全部不可用且 `on_error: allow` 时会放行，不会因此卡住签到。
+
 ## Web 控制台说明
 
 Web 控制台主要分为几块：
@@ -610,11 +655,45 @@ Web 控制台主要分为几块：
 | 区域 | 用途 |
 | --- | --- |
 | 顶部状态 | 查看账号数量、自动调度状态、下次执行时间、最近结果 |
-| 账号 | 添加账号、扫码登录、刷新凭证、删除账号 |
-| 任务配置 | 开关游戏社区签到、云游戏签到和米游币任务 |
+| 账号 | 添加账号、扫码登录、刷新凭证、删除账号、设置该账号的独立任务 |
+| 任务配置 | 开关游戏社区签到、云游戏签到和米游币任务（所有账号的默认值） |
+| 设备指纹 | 查看和更换机型、设备 ID、设备 FP |
 | 每日调度 | 设置每天什么时候自动运行 |
 | 推送通道 | 设置任务完成后的通知方式 |
+| IP 防护 | 境外 IP 时暂停签到，恢复后自动继续 |
 | 日志 | 查看本次启动后的运行记录 |
+
+### 停止正在执行的任务
+
+点顶部的「停止」按钮可以中断正在跑的签到：
+
+- 如果正在**账号间等待**（多账号之间默认随机等 1-2 小时，可在「每日调度」面板里改），会立刻中断，不再跑剩下的账号
+- 如果正在**等 IP 恢复**（IP 防护暂停中），同样会立刻中断
+- 如果正在跑某个账号的签到，会等这个账号当前的任务结束后停止，不会硬杀进程
+
+停止后仍会推送一条结果，标题会说明是手动停止的。
+
+### 每个账号单独推送
+
+推送通道里可以勾选「每跑完一个账号就推送一次」。多账号场景下，第一个账号跑完就发一条，不用等全部账号跑完（账号间隔默认长达 1-2 小时）：
+
+```
+【大号】游戏 6/6 · 米游币 +40
+【小号】游戏 2/2 · 米游币 +40
+```
+
+不勾选时只在整轮任务结束后推送一条总结。
+
+> ⚠️ 它和「只在失败时推送」(`error_only`) 是同一个开关在管：开着 `error_only` 时，
+> 逐账号的**成功**推送也会被跳过，只有失败的账号会立刻推一条，其余要等最后的总结推送。
+
+#### 命令行的退出码
+
+`python main.py run` 现在会**按任务结果返回退出码**（成功 `0`、失败 `1`），
+cron、CI、脚本可以直接用它判断要不要告警。注意 GitHub Actions 的 workflow 里那句
+`uv run python main.py run` 带了 `set -e`，所以签到失败会让这次 Action 标记为失败
+（后面的「输出任务摘要」步骤仍会执行，日志照常能看到）。
+Windows 计划任务里也可以用它决定是否重试。
 
 日志区域只显示本次 Web 服务启动后的记录。历史日志会保存在 `logs/miyouqian.log`。
 
@@ -703,6 +782,46 @@ Web 控制台添加账号后，会在配置中保存账号名。扫码登录成�
 
 通常不需要手动填写 cookie 或 stoken。
 
+### 每账号独立任务配置
+
+默认情况下所有账号共用一套任务配置。如果不同账号玩的游戏不一样，可以给单个账号设置独立任务：
+
+1. 在账号卡片右侧点击「任务」按钮（滑块图标）
+2. 勾选「为该账号单独设置任务」
+3. 勾选这个账号要跑的游戏、云游戏和米游币任务
+
+取消勾选即可让该账号恢复跟随全局配置。配置文件里的结构如下：
+
+```yaml
+accounts:
+  - name: 大号
+    tasks:
+      features:
+        game_checkin: true
+        cloud_game_checkin: false
+        bbs_tasks: false
+      games:
+        enabled:
+          - genshin
+          - starrail
+      bbs:
+        checkin: true
+  - name: 小号
+```
+
+没有 `tasks` 字段的账号，或 `tasks` 里没写的部分，都会自动沿用上面的全局配置。执行日志里出现「该账号使用独立任务配置」时，说明该账号正在使用自己的配置。
+
+### 设备指纹
+
+请求头里的机型、设备 ID（`x-rpc-device_id`）和设备指纹（`x-rpc-device_fp`）会参与米游社的风控判断。同一套指纹长期高频使用容易被标记，遇到验证码或风控时可以换一套。
+
+- 在 Web 控制台「设备指纹」面板里可以直接看到当前机型、设备 ID 和设备 FP
+- 点「随机换一个」会随机挑一个机型并重新生成设备 ID 和 FP
+- 点「使用该机型」则按下拉框里选中的机型生成新指纹
+- 内置了 39 个常见安卓机型预设，也可以在配置文件的 `device.presets` 里自己增删
+
+换指纹不影响已经登录的凭证，但需要重启程序后新的指纹才会在下次执行时生效。
+
 ### 游戏社区签到
 
 如果你想手动指定游戏，可以编辑：
@@ -755,7 +874,7 @@ accounts:
 
 云游戏 Token 获取方法：
 
-1. 云绝区零无网页版需抓包获取，参考 https://bili33.top/posts/MHYY-AutoCheckin-Manual-Gen2/#%E9%85%8D%E7%BD%AE%E8%8E%B7%E5%8F%96；云原神在浏览器打开[对应云游戏网页](https://ys.mihoyo.com/cloud/#/)并登录账号。
+1. 在浏览器打开对应云游戏网页并登录账号，例如云原神。
 2. 打开开发者工具，切到 `Network` / `网络`。
 3. 刷新页面或进入钱包/时长页面，过滤 `wallet/wallet/get`。
 4. 点开返回成功的请求，在请求头里复制 `X-Rpc-Combo_token` 的值。
@@ -780,14 +899,14 @@ bbs:
     - 5
     - 2
   checkin: true
-  read: true
-  like: true
-  share: true
   cancel_like: true
   delay_seconds:
     - 1
     - 3
 ```
+
+> `read` / `like` / `share` 三个开关目前**不生效**：程序里会强制按 `false` 处理
+> （米游社已经改了米游币获取规则）。写上它们不会有任何效果。
 
 社区 ID：
 
@@ -803,13 +922,18 @@ bbs:
 
 ### 验证码识别
 
-项目默认不会自动处理验证码。验证码识别按渠道配置，当前只适配打码狗；后续新增平台时会在同一组渠道中扩展。
+项目默认不会自动处理验证码。验证码识别按渠道配置，目前有两个渠道：本地识别（免费）和打码狗（付费）。
 
 ```yaml
 captcha:
   max_retries: 3
   channels:
-    - provider: damagou
+    - provider: local      # 本地识别，免费
+      enable: false
+      headless: true       # 用无头浏览器，改成 false 可以看到浏览器窗口
+      max_attempts: 5      # 单次验证码最多尝试几次
+      model_path: ""       # 模型路径，留空则用 data/models/
+    - provider: damagou    # 打码狗，按次收费
       enable: false
       userkey: ""
       timeout: 60
@@ -820,15 +944,32 @@ captcha:
 | 设置 | 说明 |
 | --- | --- |
 | `max_retries` | 每次触发验证码后最多重新获取并识别的次数 |
-| `channels[].provider` | 打码渠道，目前支持 `damagou` |
+| `channels[].provider` | 识别渠道，`local` 或 `damagou` |
 | `channels[].enable` | 是否启用该渠道 |
-| `channels[].userkey` | 打码狗用户 `userkey` |
-| `channels[].timeout` | 调用打码接口的超时时间，单位秒 |
 
-打码狗的 `type` 默认不需要设置；识别困难时可以在配置文件中给该渠道补 `type: "1006"`，会增加积分消耗。
+#### 本地识别（免费）
+
+米游社社区签到用的是极验三代「九宫格点选」验证码：给一个小图标，让你在 3×3 的图片里选出包含这个物体的格子。
+
+本地识别的做法是：
+
+1. 用本机 Chrome / Edge 加载极验自己的 JS，把验证码渲染出来——**校验数据由极验前端自己生成**，不去逆向加密参数，所以抗改版能力最强；
+2. 用视觉模型（CLIP 图像编码器）把提示图标和九个格子做相似度比较，挑出应当点选的格子；
+3. 用浏览器自动化点击，拿到 `geetest_validate` 后提交给米游社。
+
+需要满足：
+
+- 本机装有 Chrome 或 Edge（没有的话自动识别会失败并写日志）
+- 首次使用会自动下载视觉模型（约 85MB，走国内镜像）到 `data/models/`，需要联网
+- 因为要驱动浏览器，每次识别大概需要十几秒
+
+单次识别不一定百分百正确，所以触发验证码后会重新获取验证码并重试，最多 `max_retries × max_attempts` 次。
+
+#### 打码狗（付费）
+
+填上 `userkey` 即可，按次计费。`type` 默认不需要设置；识别困难时可以给该渠道补 `type: "1006"`，会增加积分消耗。
 
 识别、校验或提交失败时，会重新获取验证码并重试，最多执行 `max_retries` 次。
-如果打码狗识别接口返回错误且错误信息包含“余额”，任务会按失败状态通过已配置的推送渠道发送“打码狗余额不足”通知。
 
 ### 每日调度
 
@@ -849,6 +990,28 @@ schedule:
 | `jitter_minutes` | 随机延后分钟数 |
 | `run_on_start` | 启动 Web 服务后是否立即执行一次 |
 
+### 账号之间的等待
+
+多账号时，跑完一个账号会先随机等一会儿再跑下一个，让它们看起来像不同时段各自操作的真人，
+降低「同一 IP 短时间内多账号」被风控的概率。**在网页「每日调度」面板里可以直接改，不用编辑配置文件。**
+
+```yaml
+account_gap:
+  enable: true          # false = 所有账号连着跑，不等待
+  min_minutes: 60       # 最短等待（分钟）
+  max_minutes: 120      # 最长等待（分钟）
+```
+
+| 设置 | 说明 |
+| --- | --- |
+| `enable` | 关掉就等于所有账号连着跑 |
+| `min_minutes` / `max_minutes` | 每次在这两个值之间随机取一个；两个都填 `0` 也等于不等待 |
+
+- 上限是 1440 分钟（24 小时）：再长就会把后面的账号推到第二天的定时任务上去。
+- `min` 比 `max` 大也没关系，会自动交换。
+- 等待期间点网页上的「停止」可以立刻中断，不再跑剩下的账号。
+- 只有 1 个账号时不会等待。
+
 ### 网络访问与密码
 
 Web 控制台默认只监听本机地址 `127.0.0.1`，只能在本机浏览器中访问。
@@ -864,10 +1027,9 @@ web:
 
 **密码说明：**
 
-- 实际启动时的监听地址决定认证模式；命令行 `--host` 会覆盖配置文件中的 `web.host`
-- 监听 `127.0.0.1`、`localhost` 或 `::1` 时，密码设置完成后无需登录，直接访问即可
-- 监听 `0.0.0.0` 或其他非本机地址时，必须通过密码认证才能使用
-- 密码为空时，首次访问会显示密码设置页面；密码至少需要 8 位，设置后自动保存（存储为哈希值）
+- `host` 为 `127.0.0.1` 或 `localhost` 时，不需要密码，直接访问
+- `host` 为 `0.0.0.0` 或其他非本机地址时，必须设置密码才能使用
+- 首次访问会显示密码设置页面，输入后自动保存（存储为哈希值）
 - 也可以在配置文件中直接填写明文密码，启动时会自动转换为哈希
 - 服务重启后需要重新输入密码
 
@@ -912,7 +1074,6 @@ push:
 
 - Bot Token
 - Chat ID
-- 自定义 API URL ，可留空
 
 示例：
 
@@ -923,7 +1084,6 @@ push:
       enable: true
       token: "bot token"
       chat_id: "chat id"
-      api_url: ""
 ```
 
 ### 钉钉机器人
@@ -958,22 +1118,6 @@ push:
     - provider: feishubot
       enable: true
       webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/..."
-```
-
-### 企业微信机器人
-
-需要填写：
-
-- Webhook
-
-示例：
-
-```yaml
-push:
-  channels:
-    - provider: wecombot
-      enable: true
-      webhook: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."
 ```
 
 ### 邮箱
@@ -1078,7 +1222,9 @@ uv run python main.py serve --port 5891
 - 也可以用 `--host 0.0.0.0` 启动，但密码仍需在配置文件或首次访问时设置
 - 服务器时间会影响每日调度时间
 
-## 下一步计划
+## 原项目的下一步计划
+
+下面这些是**上游项目**的路线图（本 fork 不承诺跟进，仅作参考）：
 
 | 完成 | 计划 | 完成时间 |
 | --- | --- | --- |
@@ -1091,30 +1237,59 @@ uv run python main.py serve --port 5891
 | [ ] | 持续适配米游社规则变化，尽量保持工具可用 | -- |
 | [ ] | ... | -- |
 
+## 开发与测试
+
+项目自带一套回归测试，改代码前先跑一遍：
+
+```bash
+uv run python -m unittest discover -s tests -t .
+```
+
+- 测试全部在 `.tmp-tests/` 的临时目录里读写配置，**不会碰你的 `config.yaml` 和 `data/credentials.yaml`**。
+  （`run_tasks()` / 保存配置都会写盘，所以这条是硬性要求。）
+- 只用标准库 `unittest`，不需要额外安装依赖。
+- `tests/*.test.mjs` 是前端检查，需要本机有 `node`；它会直接从 `app.js` 里抽出真实函数来跑，
+  没有 node 时这部分会自动跳过。
+- 新增配置项或改前端时，记得同步补一个测试：历史上「保存配置把凭证冲掉」「筛选后兑错商品」
+  这类问题都是靠测试才守住不复发的。
+
 ## 注意事项
 
 - 请妥善保管 `data/credentials.yaml`
 - 不要公开上传配置文件、日志文件或二维码图片
+- `GET /api/config` 会把账号 cookie/stoken、推送密钥等**替换成占位符**后再回给浏览器，
+  保存时会自动还原，所以正常使用不需要关心；但这也意味着**别把抓包内容当配置备份**。
 - 遇到验证码时需要手动处理
 - 如果米游社规则变化，可能会出现签到失败，需要等待项目更新
 - 使用自动化工具存在账号风控风险，请低频、保守使用
 
+## 跟上原项目的更新
+
+本仓库把原项目配成了 `upstream` 远端，随时可以看原作者改了什么：
+
+```bash
+git fetch upstream                          # 拉取原作者的最新提交
+git log --oneline master..upstream/master   # 他有哪些改动是你还没有的（输出为空 = 已同步）
+git diff --stat master upstream/master      # 看他具体改了哪些文件
+git merge upstream/master                   # 合并进来
+```
+
+## 原作者的交流群
+
+下面是**原项目作者的官方交流群**（群号 **1028766934**）—— 想参与开发、或者使用中遇到问题，可以去群里问。
+
+> ⚠️ 这是**他的群，不是本仓库的**；群里讨论的主要也是原项目。本仓库的改动如果出了问题，请在[本仓库的 Issues](https://github.com/Sting255/MiyoQian/issues) 里提，别去麻烦群里的作者。
+
+<p align="center">
+  <img src="./assets/QQ_qrcode.jpg" alt="米游签官方交流群" width="300">
+</p>
+
 ## 致谢
 
-本项目的部分功能思路参考：
-
-- [Womsxd/MihoyoBBSTools](https://github.com/Womsxd/MihoyoBBSTools)
-- [jiarui666/mihoyo_qr_login](https://github.com/jiarui666/mihoyo_qr_login)
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=marchen-orz%2FMiyoQian&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=marchen-orz/MiyoQian&type=date&theme=dark&legend=top-left&sealed_token=vhjwsuuACDb_LXawTSesqGkBuPYIJlyRBfjCPheEATOVtk6XKQgfA354iSfjKh8YZ4QCdB3axWHYABMpO0J401QGujQHvpHahsp6thneSwwrO-KLnOefX-uozkYik3m7fNZK3QSjokXuwKwg2V8dBT9puj0uGGplCs-ydFHzG8Mrx7YBoGYhfMUtKUYU" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=marchen-orz/MiyoQian&type=date&legend=top-left&sealed_token=vhjwsuuACDb_LXawTSesqGkBuPYIJlyRBfjCPheEATOVtk6XKQgfA354iSfjKh8YZ4QCdB3axWHYABMpO0J401QGujQHvpHahsp6thneSwwrO-KLnOefX-uozkYik3m7fNZK3QSjokXuwKwg2V8dBT9puj0uGGplCs-ydFHzG8Mrx7YBoGYhfMUtKUYU" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=marchen-orz/MiyoQian&type=date&legend=top-left&sealed_token=vhjwsuuACDb_LXawTSesqGkBuPYIJlyRBfjCPheEATOVtk6XKQgfA354iSfjKh8YZ4QCdB3axWHYABMpO0J401QGujQHvpHahsp6thneSwwrO-KLnOefX-uozkYik3m7fNZK3QSjokXuwKwg2V8dBT9puj0uGGplCs-ydFHzG8Mrx7YBoGYhfMUtKUYU" />
- </picture>
-</a>
+- 原项目：[Marchen-orz/MiyoQian](https://github.com/Marchen-orz/MiyoQian) —— 本仓库是它的 fork，主要功能都出自原作者
+- 部分功能思路参考：
+  - [Womsxd/MihoyoBBSTools](https://github.com/Womsxd/MihoyoBBSTools)
+  - [jiarui666/mihoyo_qr_login](https://github.com/jiarui666/mihoyo_qr_login)
 
 ## 免责声明
 
@@ -1123,7 +1298,3 @@ uv run python main.py serve --port 5891
 使用本项目产生的账号风险、数据丢失、任务失败、风控限制或其他后果均由使用者自行承担。请妥善保管账号凭证，不要将配置文件、日志文件或二维码图片公开分享。
 
 如果你不同意以上内容，请不要使用本项目。
-
-## 友链
-
-- [linux.do](https://linux.do/) 学AI来L站~

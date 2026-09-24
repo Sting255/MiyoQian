@@ -1,15 +1,18 @@
 # MiyoQian Web UI auto-start script (watchdog).
+#
 # Invoked by the MiyoQianWebUI scheduled task through start-miyoqian-hidden.vbs.
-# Source is intentionally pure ASCII to avoid PowerShell 5.1 encoding issues
-# when the project directory contains non-ASCII characters (e.g. the Chinese
-# characters in the project path).
-# The project directory is derived from $MyInvocation.MyCommand.Path,
-# which the PowerShell host passes as a correctly-encoded Unicode string.
+# The task has two triggers: at logon, and repeating every 5 minutes. The repeat
+# exists only to revive a watchdog that died; the guards below make sure the
+# repeat never disturbs a healthy service.
+#
+# Source is intentionally pure ASCII: Windows PowerShell 5.1 decodes BOM-less
+# .ps1 files using the ANSI code page, so non-ASCII text turns into mojibake and
+# can even break parsing.
+#
 # This script lives in <project>\scripts, so the project root is one level up.
 
 $ErrorActionPreference = 'Stop'
 
-# Derive project directory from this script's own location (one level up)
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectDir = Split-Path -Parent $scriptDir
 $uvBin = Join-Path $env:USERPROFILE '.local\bin\uv.exe'
@@ -19,69 +22,78 @@ $uvBin = Join-Path $env:USERPROFILE '.local\bin\uv.exe'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
-# 1) Kill any stale instance still holding port 5890
-$existing = Get-NetTCPConnection -LocalPort 5890 -ErrorAction SilentlyContinue |
-    Where-Object State -eq 'Listen' |
-    Select-Object -ExpandProperty OwningProcess -First 1
-if ($existing) {
-    Write-Host "[start-miyoqian] Killing existing PID=$existing"
-    try {
-        taskkill /F /T /PID $existing | Out-Null
-    } catch {
-        Write-Host "[start-miyoqian] Kill failed (may be gone): $_"
-    }
-    Start-Sleep -Seconds 2
+# Force the child Python to write UTF-8. When stdout is a redirected file (not a
+# console) Python falls back to the system locale encoding (GBK on Chinese
+# Windows), which would put non-UTF-8 bytes into autostart.out.log.
+$env:PYTHONIOENCODING = 'utf-8'
+$env:PYTHONUTF8 = '1'
+
+# ---------------------------------------------------------------------------
+# Guard 1: only one watchdog at a time.
+# The task repeats every 5 minutes, and its action (wscript) exits immediately,
+# so Task Scheduler considers the task "finished" and will start it again. Without
+# this guard every repetition would start another watchdog, and each new watchdog
+# would restart main.py -- killing a check-in that is in progress.
+# ---------------------------------------------------------------------------
+$selfPid = $PID
+$otherWatchdogs = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object {
+        # Match the real invocation ("... -File <path>\start-miyoqian.ps1") rather
+        # than any command line that merely mentions the file name -- otherwise an
+        # unrelated shell (or a diagnostic command) would look like a watchdog.
+        $_.ProcessId -ne $selfPid -and
+        $_.CommandLine -and
+        $_.CommandLine -match '-File\s+.*start-miyoqian\.ps1'
+    })
+if ($otherWatchdogs.Count -gt 0) {
+    Write-Host "[start-miyoqian] another watchdog is already running (PID $($otherWatchdogs[0].ProcessId)); nothing to do"
+    exit 0
 }
 
-# 2) Ensure logs/ directory exists
+# ---------------------------------------------------------------------------
+# Guard 2: if something is already serving port 5890, monitor it instead of
+# killing it. Restarting here would interrupt a check-in that is in progress;
+# the loop at the bottom already relaunches main.py if the port goes down.
+# ---------------------------------------------------------------------------
 $logsDir = Join-Path $projectDir 'logs'
 if (-not (Test-Path $logsDir)) {
     New-Item -ItemType Directory -Path $logsDir | Out-Null
 }
-
-# 3) Make sure uv is on PATH for the child process
-$env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
-
-# Force the child Python to write UTF-8. When stdout is a redirected file (not a
-# console) Python falls back to the system locale encoding (GBK on Chinese
-# Windows), which would put non-UTF-8 bytes into autostart.out.log and make the
-# log unreadable by UTF-8 tooling.
-$env:PYTHONIOENCODING = 'utf-8'
-$env:PYTHONUTF8 = '1'
-
-# 4) Switch to project dir so uv can find main.py
-Set-Location $projectDir
-Write-Host "[start-miyoqian] Working dir: $(Get-Location)"
-
-# 5/6) Run main.py, keeping its stdout/stderr in the two log files.
-# Start-Process redirects at the OS level, so the child's bytes are written
-# verbatim (UTF-8); PowerShell's ">" would first decode them using the console
-# code page and store the result as UTF-16, which mangles non-ASCII output.
 $stdoutLog = Join-Path $logsDir 'autostart.out.log'
 $stderrLog = Join-Path $logsDir 'autostart.err.log'
 
 function Invoke-MainPy {
+    # Start-Process redirects at the OS level, so the child's bytes are written
+    # verbatim (UTF-8). PowerShell's ">" would decode them using the console code
+    # page first and store UTF-16, which mangles non-ASCII log output.
     $process = Start-Process -FilePath $uvBin -ArgumentList @('run', 'python', 'main.py') `
         -WorkingDirectory $projectDir -NoNewWindow -PassThru -Wait `
         -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
     return $process.ExitCode
 }
 
-Write-Host "[start-miyoqian] Launching uv run python main.py"
-$exitCode = Invoke-MainPy
-Write-Host "[start-miyoqian] main.py exited with code $exitCode"
+$listening = @(Get-NetTCPConnection -LocalPort 5890 -State Listen -ErrorAction SilentlyContinue)
+if ($listening.Count -gt 0) {
+    Write-Host "[start-miyoqian] port 5890 is already served by PID $($listening[0].OwningProcess); monitoring it"
+} else {
+    Set-Location $projectDir
+    $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
+    Write-Host "[start-miyoqian] launching uv run python main.py"
+    $exitCode = Invoke-MainPy
+    Write-Host "[start-miyoqian] main.py exited with code $exitCode"
+}
 
-# Watchdog loop: keep this script alive forever, and relaunch main.py
-# if/when it dies. The loop sleeps 60s between checks to avoid wasting CPU.
-# Without this loop, the script would just exit after main.py dies and the
-# Web UI would stay down until the next reboot/login.
+# Watchdog loop: keep this script alive and relaunch main.py if the port goes
+# down. Sleeps 60s between checks to avoid wasting CPU. Without this loop the
+# script would exit after main.py dies and the Web UI would stay down until the
+# next logon.
 while ($true) {
     Start-Sleep -Seconds 60
-    $listen = Get-NetTCPConnection -LocalPort 5890 -ErrorAction SilentlyContinue |
-        Where-Object State -eq 'Listen'
-    if (-not $listen) {
+    $listen = @(Get-NetTCPConnection -LocalPort 5890 -State Listen -ErrorAction SilentlyContinue)
+    if ($listen.Count -eq 0) {
         Write-Host "[start-miyoqian] watchdog: port 5890 down, relaunching main.py"
         Set-Location $projectDir
+        $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
         $code = Invoke-MainPy
         Write-Host "[start-miyoqian] watchdog: main.py exited code $code, will re-check in 60s"
     }

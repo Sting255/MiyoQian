@@ -2,6 +2,9 @@
 # 一键启动脚本（Linux / macOS / WSL）
 set -e
 
+# 切到项目根目录：本脚本在 scripts/ 下，config.yaml 和 main.py 都在上一层
+cd "$(dirname "$0")/.."
+
 echo "===== 米游签一键启动 ====="
 
 # 检查 Python

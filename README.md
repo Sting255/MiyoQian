@@ -38,7 +38,7 @@
 
 用米游社 APP 登录一次（扫码或手机号+短信），之后在本地网页控制台里管理账号、勾任务、设每天自动执行，跑完把结果推给你。
 
-<img src="./assets/home.png" alt="demo" style="max-width:100%;border-radius:10px">
+<img src="./docs/assets/home.png" alt="demo" style="max-width:100%;border-radius:10px">
 
 这份个人修改版比原版多出来的主要是这四样：
 
@@ -118,7 +118,7 @@ uv run python main.py
 
 ```powershell
 $action   = New-ScheduledTaskAction -Execute 'wscript.exe' `
-            -Argument ('//B //Nologo "' + (Resolve-Path .\start-miyoqian-hidden.vbs).Path + '"')
+            -Argument ('//B //Nologo "' + (Resolve-Path .\scripts\start-miyoqian-hidden.vbs).Path + '"')
 $trigger  = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
             -DontStopOnIdleEnd -ExecutionTimeLimit ([TimeSpan]::Zero) `
@@ -137,7 +137,7 @@ Stop-ScheduledTask  -TaskName MiyoQianWebUI
 > 1. **动作别直接写 `powershell.exe`** —— 它会弹控制台窗口，`-WindowStyle Hidden` 也挡不住；所以这里走 `wscript.exe` + `.vbs`。
 > 2. **`-DontStopOnIdleEnd` 不能省** —— 默认设置会在"空闲结束"时停止任务，并**连带杀掉整个进程树**（服务凭空消失且日志无报错）。
 
-**Linux / macOS**：用 `systemd --user` 或 `nohup` + cron 常驻即可，`start.sh` 会处理依赖。
+**Linux / macOS**：用 `systemd --user` 或 `nohup` + cron 常驻即可，`scripts/start.sh` 会处理依赖。
 
 ## Web 控制台
 
@@ -239,7 +239,7 @@ uv run python main.py serve --port 5891
 
 - **原作者的交流群**：群号 **1028766934**（这是**他的群，不是本仓库的**；本仓库改出来的问题请走 [Issues](https://github.com/Sting255/MiyoQian/issues)，别去麻烦群里的作者）。
 
-  <p align="center"><img src="./assets/QQ_qrcode.jpg" alt="米游签官方交流群" width="260"></p>
+  <p align="center"><img src="./docs/assets/QQ_qrcode.jpg" alt="米游签官方交流群" width="260"></p>
 
 - **原项目的下一步计划**：路线图在上游仓库，本 fork 不承诺跟进。
 

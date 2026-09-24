@@ -310,7 +310,7 @@ class StartScriptTest(unittest.TestCase):
         self.root = pathlib.Path(login_mod.__file__).resolve().parents[2]
 
     def test_start_sh_uses_the_current_uv_install_dir(self) -> None:
-        text = (self.root / "start.sh").read_text(encoding="utf-8")
+        text = (self.root / "scripts" / "start.sh").read_text(encoding="utf-8")
         self.assertIn(".local/bin", text, "uv 现在装在 ~/.local/bin")
         # 旧路径可以留作兜底，但必须排在前面，否则新装的 uv 找不到
         local = text.index(".local/bin")
@@ -321,12 +321,12 @@ class StartScriptTest(unittest.TestCase):
         )
 
     def test_start_sh_fails_loudly_when_uv_is_still_missing(self) -> None:
-        text = (self.root / "start.sh").read_text(encoding="utf-8")
+        text = (self.root / "scripts" / "start.sh").read_text(encoding="utf-8")
         self.assertIn("command -v uv", text.split("export PATH", 1)[-1],
                       "装完 uv 之后没有复查，失败会一路走到 uv venv 才报错")
 
     def test_start_bat_refreshes_path_after_install(self) -> None:
-        text = (self.root / "start.bat").read_text(encoding="utf-8")
+        text = (self.root / "scripts" / "start.bat").read_text(encoding="utf-8")
         self.assertIn(r"%USERPROFILE%\.local\bin", text, "装完 uv 后当前会话的 PATH 没补上")
 
 

@@ -33,6 +33,10 @@ body {
   display: inline-block;
   width: 100%;
 }
+.top-button{
+
+  flex: 0 0 auto;
+}
 
 .select-wrapper select {
   appearance: none;
@@ -79,20 +83,12 @@ body {
 }
 
 /* 页码按钮 */
-.shop-pagination .page-btn {
-  min-width: 32px;
+.shop-pagination-jump .page-btn {
+  min-width: 52px;
   height: 32px;
-  padding: 0 6px;
+  padding: 0 10px;
   border-radius: 6px;
   font-size: 14px;
-  color: var(--text-secondary, #6b7280);
-  background: transparent;
-  border: 1px solid transparent;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s;
 }
 
 .shop-pagination .page-btn:hover:not(:disabled) {
@@ -329,6 +325,24 @@ button.is-loading::before {
   border-color: var(--primary);
   color: var(--primary-strong);
   background: var(--primary-soft);
+}
+
+/* 运行中的停止按钮：红色高亮，避免被当成禁用按钮忽略 */
+#stopBtn:not(:disabled) {
+  border-color: #e5484d;
+  background: #fff1f1;
+  color: #c22b30;
+  font-weight: 700;
+}
+
+#stopBtn:not(:disabled):hover {
+  background: #e5484d;
+  border-color: #e5484d;
+  color: #fff;
+}
+
+#stopBtn:disabled {
+  opacity: 0.45;
 }
 
 .status-grid,
@@ -758,6 +772,69 @@ textarea:focus {
   border-top: 1px solid var(--line);
 }
 
+.account-task-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  min-width: 0;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.account-task-bar:hover {
+  border-color: var(--primary);
+}
+
+.account-task-bar.is-active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.account-task-bar > svg {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  color: var(--primary);
+}
+
+.account-task-bar > span:not(.disclosure) {
+  flex: 0 0 auto;
+  font-weight: 500;
+}
+
+.account-task-bar > small {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-task-bar .disclosure {
+  width: 24px;
+  height: 24px;
+}
+
+.account-task-bar .disclosure::before,
+.account-task-bar .disclosure::after {
+  top: 11px;
+  left: 6px;
+  width: 10px;
+}
+
+.account-task-bar.is-open .disclosure::after {
+  transform: rotate(0deg);
+}
+
 .account-subhead {
   display: flex;
   align-items: baseline;
@@ -809,6 +886,86 @@ textarea:focus {
 
 .account-cloud.is-disabled input {
   cursor: not-allowed;
+}
+
+.account-tasks {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.account-tasks.is-collapsed {
+  display: none;
+}
+
+.account-task-options {
+  display: grid;
+  gap: 10px;
+}
+
+.account-tasks.is-off .account-task-options {
+  opacity: 0.48;
+}
+
+.account-tasks input:disabled {
+  cursor: not-allowed;
+}
+
+.panel-hint {
+  display: block;
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.panel-divider {
+  margin: 14px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.device-current {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.device-row {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.device-row > span {
+  color: var(--muted);
+}
+
+.device-row code {
+  font-size: 12px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.device-select {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.device-select > span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.device-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .icon-only {
@@ -1032,7 +1189,7 @@ textarea:focus {
 
 .shop-tools {
   display: flex;
-  gap: 10px;
+  gap: 5px;
   flex-wrap: wrap;
   justify-content: flex-end;
 }

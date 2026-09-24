@@ -10,6 +10,7 @@ import io
 import json
 import mimetypes
 import pathlib
+import random
 import secrets
 import threading
 from datetime import datetime
@@ -21,22 +22,43 @@ from urllib.parse import parse_qs, unquote, urlparse
 import qrcode
 
 from ..auth.login import AigisRequired, CaptchaLogin, QRLogin, _QrRefreshed
-from ..core import cookies
+from ..core import captcha as captcha_mod
+from ..core import cookies, crypto
 from ..core.config import load_config, log_path, normalize_config, save_config, validate_unique_account_uids
-from ..core.http import ApiClient
+from ..core.http import ApiClient, shop_client
+from ..core.geetest.browser import cleanup_stale_profiles
+from ..core.geetest.nine import self_check as captcha_self_check
+from ..core.ipcheck import probe_links
 from ..core.logs import append_log, configure_logger, format_line, print_startup_banner
 from ..tasks.shop_exchange import ShopExchange
 from .exchange_scheduler import ExchangeScheduler
-from .notifier import send_push, send_task_push, send_exchange_push, push_channels
+from .notifier import build_push_title, push_run_result, send_push, send_exchange_push, push_channels
 from .runner import run_tasks
 from .scheduler import DailyScheduler
 
 WEB_ROOT = pathlib.Path(__file__).resolve().parents[1] / "webui"
 
+# 「测试推送」用的示例日志：让用户在真正跑任务前就能看到推送长什么样
+TEST_PUSH_SAMPLE = """# 账号 1/1: 示例账号
+游戏社区签到汇总：成功 3，失败 0，跳过 0
+云游戏签到汇总：成功 0，失败 0，跳过 0
+米游币社区任务
+米游币任务汇总：成功 1，失败 0，跳过 0，今日总共可获得 40，实际已获得 40，本次新增 40
+社区任务结束：今日已得 40，还能获得 0，当前总计 352"""
+
 # ---------------------------------------------------------------------------
 # 密码认证工具
 # ---------------------------------------------------------------------------
 AUTH_COOKIE = "myq_token"
+
+# 脱敏占位符：GET /api/config 用它代替真值。
+# 前端是「整体取回 → 改动 → 整体 POST 回来」，所以保存时看到这个值
+# （或空值）就按「未修改」处理，从服务端旧配置里把真值填回去。
+MASKED_SECRET = "__MYQ_MASKED__"
+# 账号凭证：stuid 故意不掩码——界面要显示 UID，而且它还是还原时的匹配键
+MASKED_ACCOUNT_FIELDS = ("cookie", "stoken", "mid")
+MASKED_PUSH_FIELDS = ("token", "webhook", "secret", "access_token", "smtp_password")
+MASKED_CAPTCHA_FIELDS = ("userkey",)
 
 
 def hash_password(password: str) -> str:
@@ -54,15 +76,25 @@ def check_password(password: str, stored_hash: str) -> bool:
 
 
 def is_external_host(host: str) -> bool:
-    return host not in ("127.0.0.1", "localhost", "::1")
+    """这个监听地址是不是「本机以外也能访问到」。
+
+    注意空字符串要当作「没提供」而不是外网，否则 is_external_host("") 会返回 True。
+    """
+    text = str(host or "").strip().lower()
+    if not text:
+        return False
+    return text not in ("127.0.0.1", "localhost", "::1", "[::1]", "0:0:0:0:0:0:0:1")
 
 
 class WebApp:
-    def __init__(self, config_path: pathlib.Path, host: str = "127.0.0.1", port: int = 5890) -> None:
+    def __init__(self, config_path: pathlib.Path, bound_host: str = "") -> None:
         self.config_path = config_path
         self.config = load_config(config_path)
-        self.host = host
-        self.port = port
+        # 实际监听地址（serve() 传进来）。
+        # 判断要不要密码必须看这个值，不能只看 config 里的 web.host：
+        # Dockerfile 用 `--host 0.0.0.0` 启动，而 config.example.yaml 里写的是 127.0.0.1，
+        # 只看 config 会让控制台在局域网上完全不需要认证。
+        self.bound_host = str(bound_host or "")
         self._ensure_password_hashed()
         self.log_file = log_path(config_path, self.config)
         configure_logger(self.log_file)
@@ -89,11 +121,10 @@ class WebApp:
 
     @property
     def need_auth(self) -> bool:
-        # 为了保证不会因为命令行参数、配置文件在无意间被调整导致 Web 控制台泄露到本机之外，要求首次访问 Web 控制台时必须设置一个外网访问密码
-        stored_hash = self.config.get("web", {}).get("password", "")
-        if not stored_hash:
-            return True
-        return is_external_host(str(self.host))
+        """实际监听地址或配置声明了外网，就必须认证（宁严勿松）。"""
+        web = self.config.get("web") or {}
+        config_host = str(web.get("host", "127.0.0.1"))
+        return is_external_host(self.bound_host) or is_external_host(config_host)
 
     @property
     def password_is_set(self) -> bool:
@@ -111,15 +142,13 @@ class WebApp:
         with self.lock:
             return token in self._sessions
 
-    def _revoke_session(self, token: str) -> None:
-        with self.lock:
-            self._sessions.pop(token, None)
-
     def auth_setup(self, password: str) -> str:
+        if not self.need_auth:
+            raise ValueError("当前为内网模式，无需设置密码")
         if self.password_is_set:
             raise ValueError("密码已设置，不能重复设置")
-        if len(password) < 8:
-            raise ValueError("密码长度至少 8 位")
+        if len(password) < 4:
+            raise ValueError("密码长度至少 4 位")
         with self.lock:
             self.config.setdefault("web", {})["password"] = hash_password(password)
             save_config(self.config_path, self.config)
@@ -143,6 +172,14 @@ class WebApp:
         }
 
     def start(self) -> None:
+        # 解验证码会建临时 profile 目录，正常用完就删；万一有没删干净的，
+        # 在这里兜底清扫，避免进程和磁盘一起越积越多。
+        try:
+            stale = cleanup_stale_profiles()
+            if stale:
+                self.log(f"已清理上次残留的验证码临时目录 {stale} 个", "startup")
+        except Exception as exc:
+            self.log(f"清理验证码临时目录失败: {exc}", "startup")
         self.scheduler.start()
         self.exchange_scheduler.start()
 
@@ -158,7 +195,7 @@ class WebApp:
             log_file = self.log_file
         append_log(log_file, line, component=component)
 
-    def run_all(self) -> list[str]:
+    def run_all(self, stop_event: Any = None) -> list[str]:
         with self.lock:
             config = self.config
         try:
@@ -167,6 +204,7 @@ class WebApp:
                 config,
                 str(self.config_path),
                 emit_component=lambda message, component: self.log(message, component),
+                stop_event=stop_event,
             )
         except Exception as exc:
             push_result = send_push(config, "米游签任务失败", str(exc), success=False)
@@ -174,10 +212,17 @@ class WebApp:
                 self.log(push_result, "push")
             raise
         self.log("任务编排完成，准备发送推送", "task")
-        push_result = send_task_push(config, lines)
+        _success, push_result = push_run_result(config, lines)
         if push_result:
             self.log(push_result, "push")
         return []
+
+    def stop_run(self) -> bool:
+        """停止正在执行的任务。"""
+        if not self.scheduler.stop_run():
+            return False
+        self.log("已发送停止指令，正在中断当前任务", "scheduler")
+        return True
 
     def test_push_channels(self) -> str:
         with self.lock:
@@ -185,12 +230,52 @@ class WebApp:
         channels = push_channels(config.get("push") or {})
         if not channels:
             raise ValueError("请先启用至少一个推送通道")
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        message = f"这是一条推送测试消息\n发送时间: {now}\n如收到消息，说明该通道可用"
-        result = send_push(config, "米游签推送测试", message, success=False)
+        lines = [line for line in TEST_PUSH_SAMPLE.strip().splitlines() if line.strip()]
+        result = send_push(
+            config,
+            "【推送测试】" + build_push_title(lines, True),
+            "\n".join(lines),
+            success=True,
+        )
         if result:
             self.log(result, "push")
         return result or "推送测试已完成"
+
+    def check_ip(self) -> dict[str, Any]:
+        """立即检测一次出口 IP：国内直连链路 + 境外链路分别查。"""
+        with self.lock:
+            guard = copy.deepcopy(self.config.get("ip_guard") or {})
+        report = probe_links(domestic=guard.get("endpoints") or None)
+        result = report.to_dict()
+        if report.split:
+            summary = f"分流代理：{report.reason}"
+        elif report.blocked:
+            summary = f"境外出口：{report.reason}"
+        elif report.mainland is True:
+            summary = f"中国大陆：{report.domestic.label}"
+        else:
+            summary = f"属地未知：{report.reason}"
+        self.log(f"出口 IP 检测：{summary}", "ip")
+        return result
+
+    def check_captcha_env(self) -> dict[str, Any]:
+        """真实拉起一次 Chrome + harness 页面，验证本地识别环境可用。
+
+        沙箱里测不了这个（命名管道被禁），必须放到服务环境里跑；
+        不碰账号、不下载模型，只验证「浏览器起得来、页面打得开」。
+        """
+        with self.lock:
+            channel = copy.deepcopy(captcha_mod._active_channel(self.config))
+        headless = bool(channel.get("headless", True)) if channel else True
+        result = captcha_self_check(headless=headless)
+        if result.get("ok"):
+            self.log(
+                f"验证码环境自检通过（{result.get('browser', '?')}，耗时 {result.get('seconds', '?')} 秒）",
+                "captcha",
+            )
+        else:
+            self.log(f"验证码环境自检失败：{result.get('error', '未知错误')}", "captcha")
+        return result
 
     def status(self) -> dict[str, Any]:
         with self.lock:
@@ -207,7 +292,7 @@ class WebApp:
 
     def get_config(self) -> dict[str, Any]:
         with self.lock:
-            return json.loads(json.dumps(self.config, ensure_ascii=False))
+            return public_config(self.config)
 
     def set_config(self, payload: dict[str, Any]) -> None:
         if not isinstance(payload, dict):
@@ -216,7 +301,11 @@ class WebApp:
         validate_unique_account_uids(payload)
         with self.lock:
             old_config = copy.deepcopy(self.config)
+            # 脱敏是成对的：响应里掩掉的真值必须在这里先填回来，
+            # 否则「保存一次配置」就等于把所有凭证和访问密码清空。
+            restore_masked_secrets(old_config, payload)
             preserve_push_channel_secrets(old_config, payload)
+            preserve_web_password(old_config, payload)
             normalize_config(payload)
             changes = diff_config(old_config, payload)
             self.config = payload
@@ -238,13 +327,45 @@ class WebApp:
         else:
             self.log("配置已保存，未检测到配置项变化", "config")
 
+    def reroll_device(self, preset_name: str = "") -> dict[str, Any]:
+        """更换设备指纹：挑一个机型预设并重新生成设备 id 与 fp。"""
+        with self.lock:
+            device = self.config.setdefault("device", {})
+            presets = [item for item in (device.get("presets") or []) if isinstance(item, dict)]
+            chosen: dict[str, Any] | None = None
+            if preset_name:
+                chosen = next(
+                    (item for item in presets if str(item.get("name") or "") == preset_name),
+                    None,
+                )
+                if chosen is None:
+                    raise ValueError(f"未找到机型预设: {preset_name}")
+            else:
+                current = str(device.get("name") or "")
+                candidates = [item for item in presets if str(item.get("name") or "") != current]
+                chosen = random.choice(candidates or presets) if (candidates or presets) else None
+            if chosen:
+                device["name"] = str(chosen.get("name") or device.get("name") or "")
+                device["model"] = str(chosen.get("model") or device.get("model") or "")
+            device["id"] = crypto.device_id()
+            device["fp"] = crypto.device_fp()
+            result = {
+                "id": str(device["id"]),
+                "fp": str(device["fp"]),
+                "name": str(device.get("name") or ""),
+                "model": str(device.get("model") or ""),
+            }
+            save_config(self.config_path, self.config)
+        self.log(f"设备指纹已更换：{result['name']}（{result['model']}）", "config")
+        return result
+
     def shop_goods(self, game: str = "") -> dict[str, Any]:
         game_label = game or "全部分区"
         self.log(f"开始获取商品列表: {game_label}", "exchange")
         with self.lock:
             config = copy.deepcopy(self.config)
         try:
-            with ApiClient(timeout=20.0) as client:
+            with shop_client(timeout=20.0) as client:
                 result = ShopExchange(client, config, emit=lambda message: self.log(message, "exchange")).goods(game=game)
         except Exception as exc:
             self.log(f"商品列表获取失败: {game_label}，{exc}", "exchange")
@@ -258,7 +379,7 @@ class WebApp:
         with self.lock:
             config = copy.deepcopy(self.config)
         try:
-            with ApiClient(timeout=20.0) as client:
+            with shop_client(timeout=20.0) as client:
                 result = ShopExchange(client, config).good_detail(goods_id)
         except Exception as exc:
             self.log(f"商品详情获取失败: {goods_id}，{exc}", "exchange")
@@ -271,7 +392,7 @@ class WebApp:
         with self.lock:
             config = copy.deepcopy(self.config)
         try:
-            with ApiClient(timeout=20.0) as client:
+            with shop_client(timeout=20.0) as client:
                 device_fp = ShopExchange(client, config).fetch_device_fp()
         except Exception as exc:
             self.log(f"商品兑换 device_fp 获取失败: {exc}", "exchange")
@@ -288,7 +409,7 @@ class WebApp:
         self.log(f"开始获取兑换账号信息: {account_name}，game_biz={game_biz or '无'}", "exchange")
         with self.lock:
             config = copy.deepcopy(self.config)
-        with ApiClient(timeout=20.0) as client:
+        with shop_client(timeout=20.0) as client:
             shop = ShopExchange(client, config, account)
             result: dict[str, Any] = {"points": {}, "addresses": [], "roles": []}
             try:
@@ -318,25 +439,24 @@ class WebApp:
         account = self._account_by_index(int(plan.get("account_index") or 0))
         account_name = display_account_name(account)
         goods_name = str(plan.get("goods_name") or plan.get("goods_id") or "未知商品")
-        log_prefix = f"【账号 {account_name}｜商品 {goods_name}】"
-        self.log(f"{log_prefix}开始商品兑换", "exchange")
+        self.log(f"开始商品兑换: {goods_name}，账号 {account_name}", "exchange")
         if not str(plan.get("device_fp") or "").strip():
             raise ValueError("兑换计划缺少 device_fp，请重新添加计划")
         with self.lock:
             config = copy.deepcopy(self.config)
         try:
-            with ApiClient(timeout=15.0) as client:
+            with shop_client(timeout=15.0) as client:
                 result = ShopExchange(
                     client,
                     config,
                     account,
-                    emit=lambda message: self.log(f"{log_prefix}{message}", "exchange"),
+                    emit=lambda message: self.log(message, "exchange"),
                 ).exchange_with_retry(plan, on_progress=on_progress)
         except Exception as exc:
-            self.log(f"{log_prefix}商品兑换请求异常: {exc}", "exchange")
+            self.log(f"商品兑换请求异常: {goods_name}，账号 {account_name}，{exc}", "exchange")
             raise
         summary = f"{result.get('message', '未知结果')}({result.get('retcode')})，请求 {result.get('attempt', 1)} 次"
-        self.log(f"{log_prefix}商品兑换结束: {summary}", "exchange")
+        self.log(f"商品兑换结束: {goods_name}，账号 {account_name}，{summary}", "exchange")
         return result
 
     def shop_exchange_plan_once(self, plan_index: int) -> dict[str, Any]:
@@ -421,6 +541,7 @@ class WebApp:
             self.exchange_scheduler.reload(self.config) # 移出锁外,防止嵌套等待
             if shop_config.get("push", False):
                 self._send_exchange_push(goods_name, {"ok": False, "message": summary, "attempt": 0}, plan)
+            self.exchange_scheduler.clear_progress(plan_index)
             raise
         summary = f"{result.get('message', '未知结果')}({result.get('retcode')})，请求 {result.get('attempt', 1)} 次"
         with self.lock:
@@ -437,6 +558,9 @@ class WebApp:
         # 发送兑换结果推送
         if shop_config.get("push", False):
             self._send_exchange_push(goods_name, result, plan)
+
+        # 自动路径以前不清理实时进度，_progress 里的条目会一直留着（脏数据）
+        self.exchange_scheduler.clear_progress(plan_index)
 
     def _send_exchange_push(self, goods_name: str, result: dict[str, Any], plan: dict[str, Any]) -> None:
         """发送商品兑换结果推送"""
@@ -664,19 +788,26 @@ class WebApp:
                 with self.lock:
                     self.login_state.update({"status": "exchanging", "message": "正在获取完整凭证"})
                 account_data = self._complete_login_data(login, scan)
+                if self._login_cancel.is_set():
+                    # 换 ltoken/cookie_token 期间用户点了取消：不能把凭证偷偷存下来
+                    # （UI 已经显示「登录流程已取消」，行为必须一致）
+                    self.log(f"账号 {account_name} 登录已取消，凭证未保存", "auth")
+                    return
             account = self._save_login_account(account_index, account_snapshot, account_data, draft)
             with self.lock:
                 account_name = display_account_name(account)
                 if self._login_generation == generation:
-                    self.login_state.update(
-                        {
-                            "running": False,
-                            "status": "success",
-                            "message": f"账号 {account_name} 登录成功" + ("，请保存账号" if draft else ""),
-                            "qr": "",
-                            "account_data": account_data,
-                        }
-                    )
+                    payload: dict[str, Any] = {
+                        "running": False,
+                        "status": "success",
+                        "message": f"账号 {account_name} 登录成功" + ("，请保存账号" if draft else ""),
+                        "qr": "",
+                    }
+                    if draft:
+                        # 只有草稿账号需要把凭证回传给浏览器（前端要拿它填进账号卡片再保存）。
+                        # 非草稿的凭证已经落盘，没必要在 /api/status 里反复明文回传。
+                        payload["account_data"] = account_data
+                    self.login_state.update(payload)
             if draft:
                 self.log(f"账号 {account_name} 登录成功，等待保存", "auth")
             else:
@@ -774,7 +905,7 @@ def find_duplicate_uid(accounts: list[dict[str, Any]], uid: str, exclude_index: 
 def preserve_push_channel_secrets(old_config: dict[str, Any], new_config: dict[str, Any]) -> None:
     old_channels = {
         str(channel.get("provider") or ""): channel
-        for channel in old_config.get("push", {}).get("channels", [])
+        for channel in (old_config.get("push") or {}).get("channels", [])
         if isinstance(channel, dict)
     }
     new_push = new_config.setdefault("push", {})
@@ -790,8 +921,121 @@ def preserve_push_channel_secrets(old_config: dict[str, Any], new_config: dict[s
         if not old_channel:
             continue
         for key, value in old_channel.items():
-            if key not in channel or channel.get(key) in (None, ""):
+            if key not in channel or _is_blank_secret(channel.get(key)):
                 channel[key] = value
+
+
+def preserve_web_password(old_config: dict[str, Any], new_config: dict[str, Any]) -> None:
+    """前端拿到的配置里没有 web.password（已脱敏），保存时不能把密码冲掉。"""
+    old_password = str((old_config.get("web") or {}).get("password") or "")
+    new_web = new_config.get("web")
+    if not isinstance(new_web, dict):
+        new_web = {}
+        new_config["web"] = new_web
+    if _is_blank_secret(new_web.get("password")):
+        new_web["password"] = old_password
+
+
+def restore_masked_secrets(old_config: dict[str, Any], new_config: dict[str, Any]) -> None:
+    """把响应里被掩码的凭证还原成服务端保存的真实值。
+
+    前端是「取回整个 config → 改几个字段 → 整体 POST 回来」的模型，
+    所以脱敏必须成对做：响应不回真值，保存时再把真值填回去。
+    账号按 stuid 匹配（stuid 不脱敏且唯一），避免删号/改名之后串号。
+    """
+    old_accounts = [item for item in (old_config.get("accounts") or []) if isinstance(item, dict)]
+    old_by_uid = {
+        str(item.get("stuid") or ""): item for item in old_accounts if str(item.get("stuid") or "")
+    }
+    new_accounts = [item for item in (new_config.get("accounts") or []) if isinstance(item, dict)]
+    for index, account in enumerate(new_accounts):
+        old = old_by_uid.get(str(account.get("stuid") or ""))
+        if old is None and len(new_accounts) == len(old_accounts) and index < len(old_accounts):
+            # 数量没变说明没有增删账号，按位置回退是安全的（用于改名且还没登录的账号）
+            old = old_accounts[index]
+        old = old or {}
+        for field in MASKED_ACCOUNT_FIELDS:
+            if _is_blank_secret(account.get(field)):
+                account[field] = str(old.get(field) or "")
+        _restore_cloud_tokens(account, old)
+
+    _restore_channels(old_config.get("captcha"), new_config.get("captcha"), MASKED_CAPTCHA_FIELDS)
+
+
+def _restore_channels(old_section: Any, new_section: Any, fields: tuple[str, ...]) -> None:
+    """按 provider 把某个配置段里被掩码的字段还原。"""
+    if not isinstance(new_section, dict):
+        return
+    old_by_provider = {
+        str(channel.get("provider") or ""): channel
+        for channel in ((old_section or {}).get("channels") or [])
+        if isinstance(channel, dict)
+    }
+    for channel in new_section.get("channels") or []:
+        if not isinstance(channel, dict):
+            continue
+        old_channel = old_by_provider.get(str(channel.get("provider") or "")) or {}
+        for field in fields:
+            if field in channel and _is_blank_secret(channel.get(field)):
+                channel[field] = str(old_channel.get(field) or "")
+
+
+def _restore_cloud_tokens(account: dict[str, Any], old: dict[str, Any]) -> None:
+    tokens = account_cloud_tokens(account)
+    if tokens is None:
+        return
+    old_tokens = account_cloud_tokens(old) or {}
+    for key, value in list(tokens.items()):
+        if _is_blank_secret(value):
+            tokens[key] = str(old_tokens.get(key) or "")
+
+
+def account_cloud_tokens(account: Any) -> dict[str, Any] | None:
+    if not isinstance(account, dict):
+        return None
+    cloud = account.get("cloud_games")
+    if not isinstance(cloud, dict):
+        return None
+    tokens = cloud.get("tokens")
+    return tokens if isinstance(tokens, dict) else None
+
+
+def _is_blank_secret(value: Any) -> bool:
+    """空串 / None / 掩码占位符都表示「客户端没有真值，别覆盖」。"""
+    text = str(value if value is not None else "")
+    return text == "" or text == MASKED_SECRET
+
+
+def public_config(config: dict[str, Any]) -> dict[str, Any]:
+    """导出给前端的配置：凭证只回「有没有配置」，不回真值。
+
+    前端要靠真值性判断「这个渠道/账号配好了没有」，
+    所以用占位符而不是空串——空串会被当成「用户清空了」。
+    """
+    payload = json.loads(json.dumps(config, ensure_ascii=False))
+    web = payload.get("web")
+    if isinstance(web, dict):
+        web.pop("password", None)
+    for account in payload.get("accounts") or []:
+        if not isinstance(account, dict):
+            continue
+        for field in MASKED_ACCOUNT_FIELDS:
+            account[field] = MASKED_SECRET if str(account.get(field) or "") else ""
+        tokens = account_cloud_tokens(account)
+        if tokens is not None:
+            for key, value in list(tokens.items()):
+                tokens[key] = MASKED_SECRET if str(value or "") else ""
+    for channel in ((payload.get("push") or {}).get("channels") or []):
+        if isinstance(channel, dict):
+            for field in MASKED_PUSH_FIELDS:
+                if field in channel:
+                    channel[field] = MASKED_SECRET if str(channel.get(field) or "") else ""
+    for channel in ((payload.get("captcha") or {}).get("channels") or []):
+        if isinstance(channel, dict):
+            for field in MASKED_CAPTCHA_FIELDS:
+                if field in channel:
+                    channel[field] = MASKED_SECRET if str(channel.get(field) or "") else ""
+    return payload
 
 
 def diff_config(old: Any, new: Any, path: str = "") -> list[tuple[str, Any, Any]]:
@@ -985,9 +1229,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.app.set_config(payload)
                 self.send_json({"ok": True})
                 return
+            if path == "/api/device/reroll":
+                device = self.app.reroll_device(str(payload.get("preset") or ""))
+                self.send_json({"ok": True, "device": device})
+                return
             if path == "/api/push/test":
                 result = self.app.test_push_channels()
                 self.send_json({"ok": True, "result": result})
+                return
+            if path == "/api/ip/check":
+                self.send_json({"ok": True, **self.app.check_ip()})
+                return
+            if path == "/api/captcha/check":
+                self.send_json({"ok": True, **self.app.check_captcha_env()})
                 return
             if path == "/api/run":
                 self.app.log("收到手动执行请求", "web")
@@ -995,6 +1249,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not started:
                     self.app.log("手动执行请求被拒绝：任务正在运行", "scheduler")
                     self.send_error_json("任务正在运行", HTTPStatus.CONFLICT)
+                    return
+                self.send_json({"ok": True})
+                return
+            if path == "/api/run/stop":
+                stopped = self.app.stop_run()
+                if not stopped:
+                    self.send_error_json("当前没有正在运行的任务", HTTPStatus.CONFLICT)
                     return
                 self.send_json({"ok": True})
                 return
@@ -1097,13 +1358,19 @@ class Handler(BaseHTTPRequestHandler):
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         data = target.read_bytes()
 
-        # 如果是 HTML 文件，给静态资源添加版本号
+        # 如果是 HTML 文件，给静态资源加版本号，改了前端刷新就能生效
         if content_type == "text/html":
             html_content = data.decode("utf-8")
-            app_js_path = WEB_ROOT / "app.js"
-            if app_js_path.exists():
-                mtime = int(app_js_path.stat().st_mtime)
-                html_content = html_content.replace('src="/app.js"', f'src="/app.js?v={mtime}"')
+            for asset in ("app.js", "app.css"):
+                asset_path = WEB_ROOT / asset
+                if not asset_path.exists():
+                    continue
+                mtime = int(asset_path.stat().st_mtime)
+                html_content = html_content.replace(
+                    f'src="/{asset}"', f'src="/{asset}?v={mtime}"'
+                ).replace(
+                    f'href="/{asset}"', f'href="/{asset}?v={mtime}"'
+                )
             data = html_content.encode("utf-8")
 
         # 生成 ETag（基于文件内容和修改时间）
@@ -1152,18 +1419,15 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(config_path: pathlib.Path, host: str, port: int) -> None:
-    app = WebApp(config_path, host, port)
+    app = WebApp(config_path, bound_host=host)
     Handler.app = app
     print_startup_banner("MYQ")
     app.log(f"正在启动 Web 控制台，配置文件: {config_path.resolve()}", "startup")
-    if not app.password_is_set:
-        app.log("您尚未设置外网访问密码！首次访问 Web 控制台时请您妥善设置并保管外网访问密码！", "auth")
-    if host in ("127.0.0.1", "localhost", "::1"):
-        app.log("您设置了仅监听本机，访问 Web 控制台时将不校验外网访问密码，请您知悉。", "auth")
-    else:
-        app.log("您设置了监听外网，访问 Web 控制台时将校验外网访问密码，请您妥善设置并保管外网访问密码！", "auth")
+    if app.need_auth:
+        app.log(f"外网模式（监听 {host}），访问需要密码", "auth")
+        if not app.password_is_set:
+            app.log("尚未设置访问密码，请打开控制台后按提示设置", "auth")
     server, actual_port = create_server(host, port)
-    app.port = actual_port
     if actual_port != port:
         app.log(f"端口 {port} 被占用，已切换到 {actual_port}", "startup")
     app.start()

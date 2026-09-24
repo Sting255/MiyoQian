@@ -15,6 +15,8 @@ from ..core.http import ApiClient
 
 EmitFn = Callable[[str], None]
 BJT = timezone(timedelta(hours=8))
+# 兑换接口返回这些码表示「要求人机验证」：重试没用，应当立刻停手
+CAPTCHA_RETCODES = (1034,)
 
 
 class ShopExchange:
@@ -202,6 +204,8 @@ class ShopExchange:
         result = {
             "ok": ok,
             "retcode": retcode,
+            # 触发人机验证时要把这件事标出来：继续重试既抢不到，又是在高频打接口
+            "need_captcha": retcode in CAPTCHA_RETCODES,
             "message": message or ("兑换成功" if ok else "兑换失败"),
             "sent_at": datetime.fromtimestamp(started).isoformat(timespec="milliseconds"),
             "data": data.get("data") or {},
@@ -214,7 +218,8 @@ class ShopExchange:
 
         shop = self.config.get("shop_exchange", {})
         duration = max(float(shop.get("retry_seconds") or 0), 0)
-        interval = max(float(shop.get("retry_interval") or 0.4), 0.05)
+        # 这个值是「间隔上限」，不是固定间隔：实际在 0 ~ 这个数 之间随机
+        interval = shop_retry_interval(shop)
         deadline = time.time() + duration
         last: dict[str, Any] = {}
         attempt = 0
@@ -234,7 +239,14 @@ class ShopExchange:
             remaining = deadline - time.time()
             if last.get("ok") or remaining <= 0:
                 return last
-            sleep_seconds = max(interval + random.uniform(-0.5, 0.5), 0.05)
+            if last.get("need_captcha"):
+                # 重试解决不了人机验证，只会把重试窗口烧完并高频打接口
+                self._add("兑换接口要求人机验证，无法自动处理，已停止重试")
+                return last
+            # 两次请求之间等 0 ~ interval 秒的随机值：
+            # 用户填多少就是「最多隔多少」（填 0.3 = 0~0.3 秒之间随便等），
+            # 加随机是为了让节奏不像机器，而不是让用户去猜实际会等多久。
+            sleep_seconds = random.uniform(0, interval) if interval > 0 else 0.0
             time.sleep(min(sleep_seconds, remaining))
 
     def _goods_headers(self) -> dict[str, str]:
@@ -305,6 +317,21 @@ def normalize_games(raw_games: list[Any]) -> list[dict[str, str]]:
         if key:
             games.append({"key": key, "name": name})
     return games
+
+
+def shop_retry_interval(shop: dict[str, Any]) -> float:
+    """重试间隔上限（秒）：两次请求之间在 0 ~ 这个值 之间随机等。
+
+    注意语义：用户填的数就是**最长**隔多久，不是固定间隔。
+    0 表示完全不等待（连着发）。
+    """
+    raw = shop.get("retry_interval")
+    if raw is None or raw == "":
+        return 0.4
+    try:
+        return max(float(raw), 0.0)
+    except (TypeError, ValueError):
+        return 0.4
 
 
 def needs_good_detail_time(raw: dict[str, Any]) -> bool:

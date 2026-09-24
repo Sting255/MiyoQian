@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+<meta charset="utf-8" />
+<title>geetest harness</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #ffffff; font-family: sans-serif; }
+  #captcha { padding: 24px; }
+</style>
+</head>
+<body>
+<div id="captcha"></div>
+<script src="https://static.geetest.com/static/js/gt.0.5.0.js"></script>
+<script>
+window.__gt = { status: "init", message: "", result: null };
+
+function gtParam(name) {
+  var match = new RegExp("[?&]" + name + "=([^&]*)").exec(window.location.search);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+function gtBoot() {
+  var gt = gtParam("gt");
+  var challenge = gtParam("challenge");
+  if (!gt) {
+    window.__gt = { status: "error", message: "缺少 gt", result: null };
+    return;
+  }
+  if (typeof initGeetest === "undefined") {
+    window.__gt = { status: "error", message: "gt.js 未加载", result: null };
+    return;
+  }
+  window.__gt = { status: "loading", message: "", result: null };
+  initGeetest(
+    {
+      gt: gt,
+      challenge: challenge,
+      offline: false,
+      new_captcha: true,
+      product: "float",
+      width: "300px",
+      lang: "zh-cn",
+    },
+    function (captchaObj) {
+      window.captchaObj = captchaObj;
+      captchaObj.appendTo("#captcha");
+      captchaObj.onReady(function () {
+        window.__gt.status = "ready";
+      });
+      captchaObj.onSuccess(function () {
+        try {
+          window.__gt.result = captchaObj.getValidate();
+        } catch (error) {
+          window.__gt.result = null;
+        }
+        window.__gt.status = "success";
+      });
+      captchaObj.onError(function (error) {
+        window.__gt.status = "error";
+        window.__gt.message =
+          "onError: " + (error && error.msg ? error.msg : String(error));
+      });
+      captchaObj.onClose(function () {
+        window.__gt.status = "closed";
+      });
+    }
+  );
+}
+
+if (document.readyState === "complete") gtBoot();
+else window.addEventListener("load", gtBoot);
+</script>
+</body>
+</html>

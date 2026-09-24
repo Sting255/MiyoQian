@@ -10,7 +10,6 @@ import pathlib
 import threading
 import time
 from typing import Any
-from urllib.parse import parse_qs, urlparse
 
 from .. import constants as c
 from ..core import cookies, crypto
@@ -25,6 +24,26 @@ class AigisRequired(RuntimeError):
     def __init__(self, message: str, aigis: str) -> None:
         super().__init__(message)
         self.aigis = aigis
+
+
+# 扫码等待时长：来自网页/命令行的输入必须有上下界。
+# 负数会立刻超时；超大值（比如 10**9）会让登录线程对着作废的 ticket 一直轮询，
+# 期间 web 层还会一直挡着后续登录。
+MIN_LOGIN_TIMEOUT_SECONDS = 10
+MAX_LOGIN_TIMEOUT_SECONDS = 600
+DEFAULT_LOGIN_TIMEOUT_SECONDS = 120
+
+# 二维码的终态：看到就立刻报「已失效」，不要傻等到超时
+QR_TERMINAL_STATUSES = ("Expired", "Canceled", "Cancelled")
+
+
+def clamp_login_timeout(value: Any) -> int:
+    """把用户传的扫码等待秒数夹到 [10, 600]。"""
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_LOGIN_TIMEOUT_SECONDS
+    return min(max(seconds, MIN_LOGIN_TIMEOUT_SECONDS), MAX_LOGIN_TIMEOUT_SECONDS)
 
 
 _RSA_MODULUS = int(
@@ -86,7 +105,7 @@ class PassportLogin:
             params={"stoken": stoken},
         )
         ensure_ok(data, "stoken 换 ltoken 失败")
-        return str(data.get("data", {}).get("ltoken") or "")
+        return str((data.get("data") or {}).get("ltoken") or "")
 
     def _get_cookie_token(self, stoken: str, mid: str) -> str:
         headers = self._passport_headers(stoken, mid)
@@ -99,7 +118,7 @@ class PassportLogin:
             params={"stoken": stoken},
         )
         ensure_ok(data, "stoken 换 cookie_token 失败")
-        return str(data.get("data", {}).get("cookie_token") or "")
+        return str((data.get("data") or {}).get("cookie_token") or "")
 
 
 class QRLogin(PassportLogin):
@@ -111,13 +130,14 @@ class QRLogin(PassportLogin):
             headers=self._headers(body),
         )
         ensure_ok(data, "生成二维码失败")
-        url = str(data.get("data", {}).get("url", ""))
-        ticket = str(data.get("data", {}).get("ticket", ""))
+        url = str((data.get("data") or {}).get("url", ""))
+        ticket = str((data.get("data") or {}).get("ticket", ""))
         if not url or not ticket:
             raise RuntimeError("二维码接口未返回 url/ticket")
         return url, ticket
 
     def wait(self, ticket: str, timeout: int = 120, cancel: threading.Event | None = None, cancel_events: list[threading.Event] | None = None) -> dict[str, str]:
+        timeout = clamp_login_timeout(timeout)
         started = time.time()
         last_status = ""
         while time.time() - started < timeout:
@@ -134,7 +154,7 @@ class QRLogin(PassportLogin):
                 headers=self._headers(body),
             )
             ensure_ok(data, "查询二维码状态失败")
-            status_data = data.get("data", {})
+            status_data = (data.get("data") or {})
             status = str(status_data.get("status", ""))
             if status != last_status:
                 if status == "Init":
@@ -144,6 +164,9 @@ class QRLogin(PassportLogin):
                 elif status == "Confirmed":
                     print("已确认，正在获取凭证。")
                 last_status = status
+            if status in QR_TERMINAL_STATUSES:
+                # 过期/取消要立刻说清楚，不能傻等到 timeout 再报「扫码登录超时」
+                raise RuntimeError(f"二维码已失效（{status}），请重新获取二维码")
             if status == "Confirmed":
                 user_info = status_data.get("user_info", {})
                 mid = str(user_info.get("mid") or "")
@@ -184,7 +207,7 @@ class CaptchaLogin(PassportLogin):
             headers=self._captcha_headers(aigis, create=True),
         )
         ensure_ok_or_aigis(data, headers, "发送短信验证码失败")
-        payload = data.get("data", {})
+        payload = (data.get("data") or {})
         action_type = str(payload.get("action_type") or "")
         if not action_type:
             raise RuntimeError("发送短信验证码失败: 接口未返回 action_type")
@@ -209,7 +232,7 @@ class CaptchaLogin(PassportLogin):
             headers=self._captcha_headers(aigis, create=False),
         )
         ensure_ok_or_aigis(data, headers, "短信验证码登录失败")
-        payload = data.get("data", {})
+        payload = (data.get("data") or {})
         user_info = payload.get("user_info") or {}
         token = payload.get("token") or {}
         stoken = str(token.get("token") or "")
@@ -266,7 +289,7 @@ def refresh_cookie_token(client: ApiClient, account: dict[str, Any]) -> bool:
         ensure_ok(data, "刷新 cookie_token 失败")
     except Exception:
         return False
-    token = str(data.get("data", {}).get("cookie_token") or "")
+    token = str((data.get("data") or {}).get("cookie_token") or "")
     if not token:
         return False
     account["cookie"] = cookies.replace_or_append_cookie_value(

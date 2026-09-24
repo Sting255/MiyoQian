@@ -119,7 +119,7 @@ class CloudGameCheckin:
             if latest_wallet is not None:
                 wallet = latest_wallet
         elif gained > 0:
-            # 签到响应的 free_time 是发放前快照，展示时补上本次到账的时长
+            # 签到响应里的 free_time 是「发放前」的快照，展示时要补上本次到账的时长
             free_time_info = dict(wallet.get("free_time") or {})
             free_time_info["free_time"] = str(free_time + gained)
             wallet = {**wallet, "free_time": free_time_info}

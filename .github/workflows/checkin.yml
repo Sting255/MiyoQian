@@ -32,7 +32,12 @@ jobs:
   checkin:
     name: 执行签到任务
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 多账号之间会按 account_gap 随机等 1~2 小时（防风控），20 分钟会把第二个账号
+    # 直接掐掉。6 小时是 GitHub 托管 runner 的上限。只想跑一个账号就把超时改小。
+    timeout-minutes: 350
+    env:
+      # 不设 TZ 的话 datetime.now() 是 UTC，推送和日志里的时间会比北京时间差 8 小时
+      TZ: Asia/Shanghai
 
     steps:
       - name: 拉取代码

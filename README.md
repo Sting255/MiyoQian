@@ -477,6 +477,45 @@ http://127.0.0.1:5890
 
 每日自动执行依赖当前程序保持运行。关闭终端、电脑关机或休眠后，自动任务不会继续执行。
 
+**Windows：计划任务 + 看门狗**
+
+仓库里带了两个现成脚本：
+
+- `start-miyoqian.ps1` —— 启动服务，并每 60 秒检查一次端口，服务挂了自动重新拉起（看门狗）。
+- `start-miyoqian-hidden.vbs` —— 用 `wscript.exe`（GUI 子系统）以**隐藏窗口**方式调用上面的脚本。
+
+注册一个「登录时自动启动」的计划任务：
+
+```powershell
+# 需要管理员权限（注册计划任务本身需要）
+$action   = New-ScheduledTaskAction -Execute 'wscript.exe' `
+            -Argument ('//B //Nologo "' + (Resolve-Path .\start-miyoqian-hidden.vbs).Path + '"')
+$trigger  = New-ScheduledTaskTrigger -AtLogOn
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+            -DontStopOnIdleEnd -ExecutionTimeLimit ([TimeSpan]::Zero) `
+            -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable
+Register-ScheduledTask -TaskName 'MiyoQianWebUI' -Action $action -Trigger $trigger -Settings $settings
+```
+
+启动 / 停止（启动不需要管理员权限，几秒就绪）：
+
+```powershell
+Start-ScheduledTask -TaskName MiyoQianWebUI
+Stop-ScheduledTask  -TaskName MiyoQianWebUI
+```
+
+> ⚠️ **两个坑，都踩过：**
+>
+> 1. **任务动作别直接写 `powershell.exe`。** 它是控制台程序，会弹出一个终端窗口；而且
+>    `-WindowStyle Hidden` 也挡不住 —— 它启动的 `uv.exe` / `python.exe` 同样是控制台程序，
+>    会继承并让那个窗口重新显示出来。走 `wscript.exe` + `.vbs`（窗口样式 0）才真正无窗口。
+> 2. **一定要加 `-DontStopOnIdleEnd`。** 计划任务默认是「空闲 10 分钟后、一旦空闲状态结束就停止任务」
+>    （`StopOnIdleEnd = True`），而**停止任务会连带杀掉整个子进程树**。表现是：你离开电脑一会儿、
+>    回来动一下鼠标，服务就凭空消失，而日志里**没有任何报错**。
+>    用 `Get-ScheduledTask MiyoQianWebUI | Select-Object -ExpandProperty Settings` 可以检查这个设置。
+
+Linux / macOS 可以用 `systemd --user` 服务或 `nohup` + cron；只要保证进程常驻即可，`start.sh` 里已经处理了依赖安装。
+
 
 ---
 

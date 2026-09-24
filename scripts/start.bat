@@ -2,6 +2,9 @@
 chcp 65001 >nul
 REM 一键启动脚本（Windows）
 
+REM 切到项目根目录：本脚本在 scripts\ 下，config.yaml 和 main.py 都在上一层
+cd /d "%~dp0.."
+
 echo ===== 米游签一键启动 =====
 
 REM 检查 Python
@@ -24,7 +27,7 @@ if errorlevel 1 (
 
 where uv >nul 2>&1
 if errorlevel 1 (
-    echo [错误] 装完 uv 还是找不到，请关掉这个窗口重新运行 start.bat
+    echo [错误] 装完 uv 还是找不到，请关掉这个窗口重新运行 scripts\start.bat
     pause
     exit /b 1
 )

@@ -5,11 +5,13 @@
 # characters in the project path).
 # The project directory is derived from $MyInvocation.MyCommand.Path,
 # which the PowerShell host passes as a correctly-encoded Unicode string.
+# This script lives in <project>\scripts, so the project root is one level up.
 
 $ErrorActionPreference = 'Stop'
 
-# Derive project directory from this script's own location
-$projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+# Derive project directory from this script's own location (one level up)
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$projectDir = Split-Path -Parent $scriptDir
 $uvBin = Join-Path $env:USERPROFILE '.local\bin\uv.exe'
 
 # Decode/encode console text as UTF-8 so the child's output is not mangled by the

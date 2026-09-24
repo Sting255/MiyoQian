@@ -201,3 +201,12 @@ uv run python -m pip install -r requirements.txt -t .
 > 详细参照[定时触发器说明](https://cloud.tencent.com/document/product/583/9708)
 
 ---
+
+### 日常维护（Actions 部署）
+
+- **凭证过期**：本地重跑一次 `uv run python main.py`，重新扫码登录所有账号（会更新
+  `data/credentials.yaml`），再把新内容覆盖到 GitHub Secret 的 `MIYOUQIAN_CREDENTIALS`。
+- **只跑某个账号**：Actions 页面 → Run workflow → `account` 填账号名，留空 = 全部。
+- **只跑游戏签到 / 只跑米游币**：Run workflow → `执行模式` 下拉里选。
+- **出问题先看**：Actions 页面的执行日志、以及 `logs/miyouqian.log`。
+  大部分「登录失效 / Cookie 过期」重新扫一次码就好；米游社规则变化时可能要等上游更新。

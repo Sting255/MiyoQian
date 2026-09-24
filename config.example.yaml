@@ -11,7 +11,7 @@ accounts: []
 # 如果不同账号玩不同的游戏，可以在账号下面加一段 tasks 做单独配置，
 # 没有 tasks 的账号跟随下面的全局配置。示例（取消注释即可使用）：
 # accounts:
-#   - name: 大号
+#   - name: main
 #     tasks:
 #       features:
 #         game_checkin: true        # 游戏社区签到
@@ -29,7 +29,7 @@ accounts: []
 #         forums:
 #           - 5
 #           - 2
-#   - name: 小号
+#   - name: alt
 #     tasks:
 #       features:
 #         game_checkin: true

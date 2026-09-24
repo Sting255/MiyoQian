@@ -197,7 +197,7 @@ uv run python main.py [-c 配置文件] <子命令> [参数]
 
 ```powershell
 uv run python main.py init
-uv run python main.py login --account 大号
+uv run python main.py login --account main
 uv run python main.py run
 uv run python main.py run --games-only
 uv run python main.py serve --port 5891

@@ -1,10 +1,44 @@
 # -*- coding: utf-8 -*-
-# 米游签配置文件。复制为 config.yaml 后填写或用 `python main.py login` 扫码写入。
+# 米游签配置文件
+# 复制为 config.yaml 后填写，或运行 `python main.py login` 扫码写入凭证
+# Web 控制台启动后也可以在网页里添加账号
 
 enable: true
 
-accounts:
-  []
+# 账号名在 Web 控制台里添加，本文件不用手填账号
+accounts: []
+
+# 如果不同账号玩不同的游戏，可以在账号下面加一段 tasks 做单独配置，
+# 没有 tasks 的账号跟随下面的全局配置。示例（取消注释即可使用）：
+# accounts:
+#   - name: 大号
+#     tasks:
+#       features:
+#         game_checkin: true        # 游戏社区签到
+#         cloud_game_checkin: false # 云游戏签到
+#         bbs_tasks: false          # 米游币任务
+#       games:
+#         enabled:
+#           - genshin
+#           - starrail
+#       cloud_games:
+#         enabled:
+#           - genshin
+#       bbs:
+#         checkin: true
+#         forums:
+#           - 5
+#           - 2
+#   - name: 小号
+#     tasks:
+#       features:
+#         game_checkin: true
+#         bbs_tasks: false
+#       games:
+#         enabled:
+#           - starrail
+#           - zzz
+
 # 账号凭据（cookie、stoken、云游戏 tokens 等）存储在 data/credentials.yaml 中
 
 storage:
@@ -13,6 +47,9 @@ storage:
   log_dir: logs
   log_file: miyouqian.log
 
+# 设备指纹：请求头里的机型与设备标识，换一套可以让多账号看起来来自不同设备
+# 下面只列出一部分，完整内置列表见 miyouqian/core/config.py 的 DEFAULT_DEVICE_PRESETS
+# 也可以在 Web 控制台的「设备指纹」面板里一键更换
 device:
   id: ""
   fp: ""
@@ -30,71 +67,153 @@ device:
     - name: "vivo X100"
       model: "V2309A"
 
+# === 任务开关 ===
+# 开启你要的功能（true = 启用，false = 关闭）
 features:
-  game_checkin: true
-  cloud_game_checkin: false
-  bbs_tasks: false
+  game_checkin: true           # 游戏社区签到（原神/星铁/绝区零等）
+  cloud_game_checkin: false    # 云游戏签到（云原神/云绝区零，需要单独配 token）
+  bbs_tasks: true              # 米游币任务（看帖、点赞、分享）
 
+# 验证码识别（可选；本地识别免费，需要在有 Chrome/Edge 的机器上运行）
 captcha:
   max_retries: 3
   channels:
+    # 本地识别：用本机浏览器跑极验自己的 JS + 视觉模型判断点选
+    - provider: local
+      enable: false
+      headless: true     # false = 显示浏览器窗口，便于排查
+      max_attempts: 5    # 单次验证码最多尝试次数
+      model_path: ""     # 留空则用 data/models/clip_vision_quant.onnx
+    # 打码狗：按次计费，填 userkey 即可
     - provider: damagou
       enable: false
-      userkey: ""   # 打码狗 userkey
+      userkey: ""        # 打码狗 userkey
       timeout: 60
 
+# === IP 防护 ===
+# 每个账号签到前先查一次公网出口 IP：不在中国大陆就暂停签到，
+# 每隔一段时间复查，回到大陆后自动继续；超过最长等待时间就放弃本次。
+ip_guard:
+  enable: true             # 关闭后不再检查，境外 IP 也会照常签到
+  check_interval: 300      # 复查间隔（秒），默认 5 分钟
+  max_wait: 7200           # 最长等待（秒），默认 2 小时；0 = 一直等
+  notify: true             # 暂停 / 恢复 / 放弃时推送通知
+  on_error: allow          # 查询失败时：allow=放行继续签到，block=按境外处理
+  endpoints: []            # 可选：自定义查询接口，留空用内置接口
+
+# === 本地每日调度 ===
+# 注意：只在 `python main.py` 启动 Web 控制台常驻时生效
+# GitHub Actions 部署请改 .github/workflows/checkin.yml 里的 cron 表达式
 schedule:
-  enable: false
-  time: "09:00"
-  jitter_minutes: 45
-  run_on_start: false
+  enable: true
+  time: "09:00"             # 每天基准执行时间
+  jitter_minutes: 30        # 随机波动（避免整点被风控）
+  run_on_start: false       # Web 启动后立即执行一次
 
+# === 账号之间的等待 ===
+# 多账号时，跑完一个账号先随机等一会儿再跑下一个，让它们看起来像不同时段
+# 各自操作的真人，降低「同一 IP 短时间内多账号」被风控的概率。
+# 在网页「每日调度」面板里也能直接改。
+account_gap:
+  enable: true          # false = 所有账号连着跑，不等待
+  min_minutes: 60       # 最短等待（分钟）
+  max_minutes: 120      # 最长等待（分钟）；两个都填 0 也等于不等待
+
+# Web 控制台（扫码登录 + 看日志 + 改配置都在这里）
 web:
-  host: "127.0.0.1"   # 监听地址，默认仅本机访问；设为 "0.0.0.0" 允许外网访问
-  port: 5890          # 监听端口
-  password: ""        # Web 控制台访问密码；监听外网时必须认证
-                      # 留空表示未设置，首次访问通过页面设置（至少 8 位）；密码哈希会自动保存到此字段
+  host: "127.0.0.1"   # 仅本机访问；想局域网/外网访问改成 "0.0.0.0"
+  port: 5890          # 端口
+  password: ""        # 留空 = 无密码；外网访问必须设置
 
+# === 游戏签到 ===
+# 默认原神/星铁/绝区零，需要其他游戏就把 game_code 加进去
 games:
   enabled:
-    - genshin
-    - starrail
-    - zzz
+    - genshin        # 原神
+    - starrail       # 崩坏：星穹铁道
+    - zzz            # 绝区零
+    # - honkai3rd     # 崩坏3
+    # - tears         # 未定事件簿
+    # - honkai2       # 崩坏学园2
   black_list:
-    genshin: []
+    genshin: []      # 不想签的 UID 加这里
     starrail: []
     zzz: []
 
+# === 云游戏签到（默认关闭，需要云游戏 token） ===
 cloud_games:
   enabled:
-    - genshin
-    - zzz
+    - genshin        # 云原神
+    - zzz            # 云绝区零
 
+# === 米游币任务 ===
 bbs:
   forums:
-    - 5
-    - 2
-  checkin: true
-  read: true
-  like: true
-  share: true
-  cancel_like: true
+    - 5              # 大别野
+    - 2              # 原神
+    - 6              # 崩坏：星穹铁道
+    - 8              # 绝区零
+    # 注意：这里填的是上面的社区 ID（1/2/3/4/5/6/8），不是论坛的 forum_id
+    # - 1            # 崩坏3
+    # - 4            # 未定事件簿（forum_id 是 37）
+    # - 3            # 崩坏学园2（forum_id 是 30）
+  checkin: true       # 讨论区签到
+  # read / like / share 目前不生效：程序里会强制按 false 处理（米游社已改规则）。
+  # 不要指望打开它们能多做任务。
+  cancel_like: true   # 点赞后自动取消（更安全）
   post_limit: 5
   delay_seconds:
-    - 1
-    - 3
+    - 1               # 任务间随机延迟下限（秒）
+    - 3               # 任务间随机延迟上限（秒）
 
+# === 推送通知（可选） ===
+# 失败时推送就填这个，至少配一个，否则失败你不知道
 push:
-  error_only: false
+  error_only: false    # true = 只在失败时推送
+  # per_account: true = 每跑完一个账号就推一次，不用等全部账号跑完（多账号间隔可能 1~2 小时）。
+  # 注意它和 error_only 是同一个开关在管：error_only=true 时，逐账号的「成功」推送也会被跳过，
+  # 只有失败的账号才会立刻推一条，剩下的要等总结推送。
+  per_account: false
   channels:
-    - provider: pushplus
+    - provider: pushplus        # 微信推送（推荐）
       enable: false
-      token: ""
+      token: ""                  # pushplus token
       topic: ""
 
+    # - provider: telegram      # Telegram 推送
+    #   enable: false
+    #   token: "bot token"
+    #   chat_id: "chat id"
+
+    # - provider: dingrobot      # 钉钉机器人
+    #   enable: false
+    #   webhook: "https://oapi.dingtalk.com/robot/send?access_token=xxx"
+    #   secret: ""
+
+    # - provider: feishubot      # 飞书机器人
+    #   enable: false
+    #   webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/xxx"
+
+    # 想加新渠道请先在 miyouqian/service/notifier.py 的 _send 里实现，
+    # 只在这里写 provider 是不会生效的（会被静默忽略）。
+    # 目前支持：pushplus / qq / telegram / dingrobot / feishubot / email
+
+    # - provider: email
+    #   enable: false
+    #   smtp_host: "smtp.example.com"
+    #   smtp_port: 465
+    #   smtp_user: ""
+    #   smtp_password: ""
+    #   mail_from: ""
+    #   mail_to: ""
+    #   smtp_ssl: true
+
+# === 米游币商品兑换（高级功能，默认先关掉） ===
+# 到开卖那一刻会替你连着按「兑换」，抢到就停；一直没抢到就坚持到 retry_seconds 用完为止。
+# 网页「自动兑换」面板里也能改这两个数字，并且会实时估算大概发几次请求。
 shop_exchange:
-  enable: true
-  retry_seconds: 20
-  retry_interval: 0.4
-  push: true          # 是否发送兑换结果推送
+  enable: false         # 只管"到点自动抢"；关着也能在商品卡片上手动点「立即兑换」
+  retry_seconds: 20     # 到点后最多抢几秒（0 = 只发一次，不重试）
+  retry_interval: 0.4   # 每两次请求之间最多隔几秒（实际在 0~这个数之间随机，0 = 不等）
+  push: true            # 兑换结束后是否推送结果
   plans: []

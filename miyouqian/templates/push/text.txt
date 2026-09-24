@@ -1,9 +1,5 @@
 【{{title_text}}】
-状态：{{status_text}}
-时间：{{time}}
+状态：{{status_text}} · {{time}}
 
-账号摘要：
 {{account_sections_text}}
-
-详细日志：
-{{detail_text}}
+{{overview_text}}

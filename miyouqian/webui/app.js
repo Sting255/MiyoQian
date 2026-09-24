@@ -23,12 +23,14 @@ const pushChannelOptions = [
   ["telegram", "Telegram"],
   ["dingrobot", "钉钉机器人"],
   ["feishubot", "飞书机器人"],
-  ["wecombot", "企业微信机器人"],
   ["email", "邮箱"],
   ["qq", "QQ推送"]
 ];
 
-const captchaChannelOptions = [["damagou", "打码狗(成本≈0.01元/次)"]];
+const captchaChannelOptions = [
+  ["local", "本地识别(免费，需本机 Chrome)"],
+  ["damagou", "打码狗(成本≈0.01元/次)"],
+];
 const bbsInteractionDisabledReason =
   "米游社改版，社区互动已无法获取米游币，待新获取方式更新~";
 
@@ -43,6 +45,7 @@ let loginCountdownTimer = null;
 let loginErrorCollapseTimer = null;
 let editingAccountIndex = null;
 let expandedCloudAccounts = new Set();
+let expandedTaskAccounts = new Set();
 let editingPushProviders = new Set();
 let editingCaptchaProviders = new Set();
 let logsPinnedToBottom = true;
@@ -51,14 +54,15 @@ let shopGoods = [];
 let shopGames = [{ key: "", name: "全部分区" }];
 let shopSelectedGame = "";
 let shopOpenPlans = new Set();
-let shopRunningProgress = {};
 let shopRequestInFlight = false;
 let shopGoodsLoading = false;
 let shopGoodsLoadSeq = 0;
 let shopExchangeNowGoodsId = "";
 let shopPlanAddressCache = new Map();
+let shopFilterStatus = '';
 let shopCurrentPage = 1;          // 当前页码，从1开始
-const SHOP_PAGE_SIZE = 5;        // 每页显示商品数
+const SHOP_PAGE_SIZE = 4;        // 每页显示商品数
+
 
 const $ = (id) => document.getElementById(id);
 
@@ -93,8 +97,22 @@ async function loadConfig() {
     ...account,
     _draft: false,
   }));
+  expandedTaskAccounts = new Set(
+    config.accounts
+      .map((account, index) => (hasAccountTasks(account) ? index : -1))
+      .filter((index) => index >= 0),
+  );
   renderConfig();
   loadAllPlanAddresses();
+}
+
+function getFilteredGoods() {
+  if (shopFilterStatus === 'sold_out') {
+    return shopGoods.filter(g => isShopGoodSoldOut(g));
+  } else if (shopFilterStatus === 'available') {
+    return shopGoods.filter(g => !isShopGoodSoldOut(g) && canShopGoodExchangeNow(g));
+  }
+  return shopGoods;
 }
 
 function renderConfig() {
@@ -102,6 +120,11 @@ function renderConfig() {
   $("scheduleTime").value = config.schedule?.time || "09:00";
   $("scheduleJitter").value = config.schedule?.jitter_minutes ?? 45;
   $("runOnStart").checked = Boolean(config.schedule?.run_on_start ?? false);
+  const gap = config.account_gap || {};
+  $("accountGapEnable").checked = Boolean(gap.enable ?? true);
+  $("accountGapMin").value = gap.min_minutes ?? 60;
+  $("accountGapMax").value = gap.max_minutes ?? 120;
+  renderScheduleSummary();
 
   $("gameCheckin").checked = Boolean(config.features?.game_checkin ?? true);
   $("cloudGameCheckin").checked = Boolean(
@@ -115,14 +138,68 @@ function renderConfig() {
   setBbsInteractionDisabled();
 
   $("pushErrorOnly").checked = Boolean(config.push?.error_only ?? false);
+  $("pushPerAccount").checked = Boolean(config.push?.per_account ?? false);
   $("captchaMaxRetries").value = config.captcha?.max_retries ?? 3;
+
+  const guard = config.ip_guard || {};
+  $("ipGuardEnable").checked = Boolean(guard.enable ?? true);
+  $("ipGuardInterval").value = Math.max(
+    1,
+    Math.round((guard.check_interval ?? 300) / 60),
+  );
+  $("ipGuardMaxWait").value = Math.max(
+    0,
+    Math.round((guard.max_wait ?? 7200) / 60),
+  );
+  $("ipGuardNotify").checked = Boolean(guard.notify ?? true);
+  $("ipGuardBlockOnError").checked = String(guard.on_error || "allow") === "block";
+  renderIpGuardSummary();
   renderGames();
   renderCloudGames();
   renderPushChannels();
   renderCaptchaChannels();
   updateTaskDependencyState();
   renderAccounts();
+  renderDevice();
   renderShopConfig();
+}
+
+function renderDevice() {
+  const device = config.device || {};
+  const nameNode = $("deviceName");
+  if (nameNode) {
+    nameNode.textContent = device.name
+      ? `${device.name}（${device.model || "-"}）`
+      : "未设置";
+  }
+  if ($("deviceId")) $("deviceId").textContent = device.id || "-";
+  if ($("deviceFp")) $("deviceFp").textContent = device.fp || "-";
+  if ($("deviceSummary")) {
+    $("deviceSummary").textContent = device.name
+      ? `${device.name} · ${device.model || "-"}`
+      : "查看当前机型";
+  }
+  const select = $("devicePreset");
+  if (!select) return;
+  const current = device.name || "";
+  select.innerHTML = (device.presets || [])
+    .map((preset) => {
+      const name = preset?.name || "";
+      const model = preset?.model || "";
+      return `<option value="${escapeAttr(name)}" ${name === current ? "selected" : ""}>${escapeHtml(`${name}（${model}）`)}</option>`;
+    })
+    .join("");
+}
+
+async function rerollDevice(preset) {
+  const result = await api("/api/device/reroll", {
+    method: "POST",
+    body: JSON.stringify(preset ? { preset } : {}),
+  });
+  const device = result.device || {};
+  config.device = { ...(config.device || {}), ...device };
+  renderDevice();
+  return device;
 }
 
 function renderGames() {
@@ -173,6 +250,7 @@ function updateTaskDependencyState() {
     !bbsEnabled,
   );
   setBbsInteractionDisabled();
+  updateAccountTaskInputs();
 }
 
 function setTaskGroupDisabled(groupId, selector, disabled) {
@@ -313,7 +391,6 @@ function pushChannelFields(provider, channel) {
     webhook: channel.webhook || "",
     topic: channel.topic || "",
     chat_id: channel.chat_id || "",
-    api_url: channel.api_url || "",
     secret: channel.secret || "",
     push_url: channel.push_url || "",
     access_token: channel.access_token || "",
@@ -368,14 +445,12 @@ function pushChannelFields(provider, channel) {
     telegram: [
       field("token", "Bot Token", "password"),
       field("chat_id", "Chat ID"),
-      field("api_url", "自定义 API URL (可选)"),
     ],
     dingrobot: [
       field("webhook", "Webhook", "password"),
       field("secret", "加签 Secret", "password"),
     ],
     feishubot: [field("webhook", "Webhook", "password")],
-    wecombot: [field("webhook", "Webhook", "password")],
     email: [
       field("smtp_host", "SMTP 服务器"),
       field("smtp_port", "SMTP 端口", "number"),
@@ -435,7 +510,6 @@ function hasPushChannelConfig(channel) {
     "webhook",
     "topic",
     "chat_id",
-    "api_url",
     "secret",
     "push_url",
     "access_token",
@@ -454,10 +528,9 @@ function pushChannelFieldNames(provider) {
   const fields = {
     pushplus: ["token", "topic"],
     qq: ["push_url", "access_token", "send_id", "msg_type"],
-    telegram: ["token", "chat_id", "api_url"],
+    telegram: ["token", "chat_id"],
     dingrobot: ["webhook", "secret"],
     feishubot: ["webhook"],
-    wecombot: ["webhook"],
     email: [
       "smtp_host",
       "smtp_port",
@@ -623,6 +696,15 @@ function captchaChannelHiddenFields(channel) {
 }
 
 function emptyCaptchaChannel(provider) {
+  if (provider === "local") {
+    return {
+      provider,
+      enable: true,
+      headless: true,
+      max_attempts: 5,
+      model_path: "",
+    };
+  }
   return {
     provider,
     enable: true,
@@ -657,7 +739,10 @@ function findCaptchaChannel(provider) {
 }
 
 function hasCaptchaChannelConfig(channel) {
-  return Boolean(channel && String(channel.userkey || "").trim());
+  if (!channel) return false;
+  // 本地识别不需要额外凭证
+  if (channel.provider === "local") return true;
+  return Boolean(String(channel.userkey || "").trim());
 }
 
 function renderAccounts() {
@@ -709,11 +794,18 @@ function renderAccounts() {
               </button>
             </div>
           </div>
+          <div class="account-task-bar ${hasAccountTasks(account) ? "is-active" : ""} ${expandedTaskAccounts.has(index) ? "is-open" : ""}" data-toggle-tasks="${index}" role="button" tabindex="0" title="设置该账号单独要跑的任务">
+            <svg><use href="#i-sliders"></use></svg>
+            <span>任务配置</span>
+            <small>${escapeHtml(accountTaskSummary(account))}</small>
+            <span class="disclosure" aria-hidden="true"></span>
+          </div>
           <input data-field="stuid" type="hidden" value="${escapeAttr(account.stuid || "")}" />
           <input data-field="stoken" type="hidden" value="${escapeAttr(account.stoken || "")}" />
           <input data-field="mid" type="hidden" value="${escapeAttr(account.mid || "")}" />
           <textarea class="hidden-field" data-field="cookie">${escapeHtml(account.cookie || "")}</textarea>
           ${accountCloudGameFields(account, index)}
+          ${accountTaskFields(account, index)}
           <div class="account-login-slot" data-login-slot="${index}"></div>
         </div>
       `,
@@ -749,6 +841,19 @@ function renderAccounts() {
         expandedCloudAccounts.delete(index);
       } else {
         expandedCloudAccounts.add(index);
+      }
+      renderAccounts();
+    });
+  });
+  document.querySelectorAll("[data-toggle-tasks]").forEach((button) => {
+    button.addEventListener("click", () => {
+      collectConfig();
+      const index = Number(button.dataset.toggleTasks);
+      if (expandedTaskAccounts.has(index)) {
+        expandedTaskAccounts.delete(index);
+      } else {
+        expandedTaskAccounts.add(index);
+        expandedCloudAccounts.delete(index);
       }
       renderAccounts();
     });
@@ -803,6 +908,7 @@ function renderAccounts() {
       if (editingAccountIndex !== null && editingAccountIndex > index)
         editingAccountIndex -= 1;
       expandedCloudAccounts = shiftExpandedCloudAccounts(index);
+      expandedTaskAccounts = shiftExpandedTaskAccounts(index);
       renderAccounts();
       if (!removed?._draft) {
         autoSaveConfig()
@@ -866,6 +972,209 @@ function shiftExpandedCloudAccounts(removedIndex) {
   return shifted;
 }
 
+function shiftExpandedTaskAccounts(removedIndex) {
+  const shifted = new Set();
+  expandedTaskAccounts.forEach((index) => {
+    if (index < removedIndex) shifted.add(index);
+    if (index > removedIndex) shifted.add(index - 1);
+  });
+  return shifted;
+}
+
+function hasAccountTasks(account) {
+  const tasks = account?.tasks;
+  if (!tasks || typeof tasks !== "object") return false;
+  return ["features", "games", "cloud_games", "bbs"].some((section) => {
+    const value = tasks[section];
+    return Boolean(value && typeof value === "object" && Object.keys(value).length);
+  });
+}
+
+function accountEffectiveTasks(tasks = {}) {
+  const features = tasks?.features || {};
+  return {
+    features: {
+      game_checkin:
+        features.game_checkin ?? config.features?.game_checkin ?? true,
+      cloud_game_checkin:
+        features.cloud_game_checkin ??
+        config.features?.cloud_game_checkin ??
+        false,
+      bbs_tasks: features.bbs_tasks ?? config.features?.bbs_tasks ?? false,
+    },
+    games: tasks?.games?.enabled ?? config.games?.enabled ?? [],
+    cloudGames: tasks?.cloud_games?.enabled ?? config.cloud_games?.enabled ?? [],
+    bbsCheckin: tasks?.bbs?.checkin ?? config.bbs?.checkin ?? true,
+  };
+}
+
+function accountTaskSummary(account) {
+  if (!hasAccountTasks(account)) return "任务跟随全局";
+  const eff = accountEffectiveTasks(account.tasks || {});
+  const parts = [];
+  if (eff.features.game_checkin) {
+    const names = eff.games.map(
+      (key) => gameOptions.find(([code]) => code === key)?.[1] || key,
+    );
+    parts.push(names.length ? names.join("、") : "无游戏");
+  }
+  if (eff.features.cloud_game_checkin) parts.push("云游戏");
+  if (eff.features.bbs_tasks) parts.push("米游币");
+  return parts.length ? `独立任务：${parts.join(" + ")}` : "独立任务：不执行";
+}
+
+function accountTaskFields(account, index) {
+  const enabled = hasAccountTasks(account);
+  const eff = accountEffectiveTasks(account.tasks || {});
+  const games = new Set(eff.games);
+  const cloudGames = new Set(eff.cloudGames);
+  const gameChips = gameOptions
+    .map(
+      ([key, label]) => `
+        <label class="chip">
+          <input type="checkbox" data-account-game="${key}" data-autosave ${games.has(key) ? "checked" : ""} />
+          <span>${label}</span>
+        </label>`,
+    )
+    .join("");
+  const cloudChips = cloudGameOptions
+    .map(([key, label, disabled, reason]) => {
+      const title = reason ? ` title="${escapeAttr(reason)}"` : "";
+      return `
+        <label class="chip ${disabled ? "disabled" : ""}"${title}>
+          <input type="checkbox" data-account-cloud-game="${key}" data-autosave ${cloudGames.has(key) ? "checked" : ""} ${disabled ? 'data-account-cloud-game-disabled="1" disabled' : ""} />
+          <span>${label}</span>
+        </label>`;
+    })
+    .join("");
+  const expanded = expandedTaskAccounts.has(index);
+  return `
+    <div class="account-tasks ${expanded ? "" : "is-collapsed"}" data-account-tasks-panel="${index}">
+      <div class="account-subhead">
+        <strong>任务配置</strong>
+        <small>${enabled ? "该账号使用独立配置" : "跟随全局配置"}</small>
+      </div>
+      <label class="check-row task-switch">
+        <input type="checkbox" data-account-tasks-enabled data-autosave ${enabled ? "checked" : ""} />
+        <span>为该账号单独设置任务</span>
+      </label>
+      <div class="account-task-options">
+        <label class="check-row task-switch">
+          <input type="checkbox" data-account-feature="game_checkin" data-autosave ${eff.features.game_checkin ? "checked" : ""} />
+          <span>游戏社区签到</span>
+        </label>
+        <div class="chips">${gameChips}</div>
+        <label class="check-row task-switch">
+          <input type="checkbox" data-account-feature="cloud_game_checkin" data-autosave ${eff.features.cloud_game_checkin ? "checked" : ""} />
+          <span>云游戏签到</span>
+        </label>
+        <div class="chips">${cloudChips}</div>
+        <label class="check-row task-switch">
+          <input type="checkbox" data-account-feature="bbs_tasks" data-autosave ${eff.features.bbs_tasks ? "checked" : ""} />
+          <span>米游币任务</span>
+        </label>
+        <div class="chips">
+          <label class="chip">
+            <input type="checkbox" data-account-bbs-checkin data-autosave ${eff.bbsCheckin ? "checked" : ""} />
+            <span>社区签到</span>
+          </label>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function updateAccountTaskInputs() {
+  document.querySelectorAll("[data-account-tasks-panel]").forEach((panel) => {
+    const master = panel.querySelector("[data-account-tasks-enabled]");
+    const on = Boolean(master?.checked);
+    panel.classList.toggle("is-off", !on);
+    const subhead = panel.querySelector(".account-subhead small");
+    if (subhead) {
+      subhead.textContent = on ? "该账号使用独立配置" : "跟随全局配置";
+    }
+    const subInputs = panel.querySelectorAll(
+      "[data-account-feature], [data-account-game], [data-account-cloud-game], [data-account-bbs-checkin]",
+    );
+    if (!on) {
+      subInputs.forEach((input) => {
+        input.disabled = true;
+      });
+      return;
+    }
+    const groupOn = (name) =>
+      Boolean(panel.querySelector(`[data-account-feature="${name}"]`)?.checked);
+    panel
+      .querySelectorAll("[data-account-game]")
+      .forEach((input) => {
+        input.disabled = !groupOn("game_checkin");
+      });
+    panel
+      .querySelectorAll(
+        "[data-account-cloud-game]:not([data-account-cloud-game-disabled])",
+      )
+      .forEach((input) => {
+        input.disabled = !groupOn("cloud_game_checkin");
+      });
+    panel.querySelectorAll("[data-account-bbs-checkin]").forEach((input) => {
+      input.disabled = !groupOn("bbs_tasks");
+    });
+  });
+}
+
+function collectAccountTasks(row, previous = {}) {
+  const master = row.querySelector("[data-account-tasks-enabled]");
+  if (!master?.checked) return null;
+  const groupOn = (name) =>
+    Boolean(
+      row.querySelector(`[data-account-feature="${name}"]`)?.checked,
+    );
+  return {
+    features: {
+      game_checkin: groupOn("game_checkin"),
+      cloud_game_checkin: groupOn("cloud_game_checkin"),
+      bbs_tasks: groupOn("bbs_tasks"),
+    },
+    games: {
+      enabled: collectChipSelection(
+        Array.from(row.querySelectorAll("[data-account-game]")),
+        (input) => input.dataset.accountGame,
+        previous?.games,
+      ),
+    },
+    cloud_games: {
+      enabled: collectChipSelection(
+        Array.from(row.querySelectorAll("[data-account-cloud-game]")),
+        (input) => input.dataset.accountCloudGame,
+        previous?.cloud_games,
+      ),
+    },
+    bbs: {
+      checkin: Boolean(
+        row.querySelector("[data-account-bbs-checkin]")?.checked,
+      ),
+    },
+  };
+}
+
+// 收集 chip 选择。
+//
+// 有两种情况 DOM 里的 checked **不代表用户意图**，此时必须保持原值：
+//   1) 面板还没渲染出来（一个 chip 都没有）；
+//   2) 所有 chip 都被禁用 —— 例如「云游戏签到」总开关关着时，
+//      updateTaskDependencyState() 会把 chips 全部 disabled。
+// 不加这层保护的话，一次 autosave 就会把已保存的选择静默清空成 []。
+// 09-23 真实事故：全局和账号级的 cloud_games.enabled 就是这样被清掉的。
+function collectChipSelection(chips, keyOf, fallback) {
+  const previous = Array.isArray(fallback) ? [...fallback] : [];
+  if (!chips.length) return previous;
+  const selected = chips.filter((input) => input.checked).map(keyOf);
+  if (selected.length) return selected;
+  // 一个都没勾：只有面板可交互时才认为用户真的全部取消了
+  const interactive = chips.some((input) => !input.disabled);
+  return interactive ? [] : previous;
+}
+
 function collectConfig() {
   config.schedule = {
     enable: $("scheduleEnable").checked,
@@ -873,19 +1182,30 @@ function collectConfig() {
     jitter_minutes: Number($("scheduleJitter").value || 0),
     run_on_start: $("runOnStart").checked,
   };
+  // 账号间隔：新增字段必须在这里显式采集，否则保存即丢失（本项目的经典坑）
+  config.account_gap = {
+    enable: $("accountGapEnable").checked,
+    min_minutes: Number($("accountGapMin").value || 0),
+    max_minutes: Number($("accountGapMax").value || 0),
+  };
+  renderScheduleSummary();
   config.features = {
     game_checkin: $("gameCheckin").checked,
     cloud_game_checkin: $("cloudGameCheckin").checked,
     bbs_tasks: $("bbsTasks").checked,
   };
   config.games = config.games || {};
-  config.games.enabled = Array.from(
-    document.querySelectorAll("[data-game]:checked"),
-  ).map((input) => input.dataset.game);
+  config.games.enabled = collectChipSelection(
+    Array.from(document.querySelectorAll("[data-game]")),
+    (input) => input.dataset.game,
+    config.games.enabled,
+  );
   config.cloud_games = config.cloud_games || {};
-  config.cloud_games.enabled = Array.from(
-    document.querySelectorAll("[data-cloud-game]:checked"),
-  ).map((input) => input.dataset.cloudGame);
+  config.cloud_games.enabled = collectChipSelection(
+    Array.from(document.querySelectorAll("[data-cloud-game]")),
+    (input) => input.dataset.cloudGame,
+    config.cloud_games.enabled,
+  );
   config.bbs = {
     ...(config.bbs || {}),
     checkin: $("bbsCheckin").checked,
@@ -896,6 +1216,7 @@ function collectConfig() {
   config.push = {
     ...(config.push || {}),
     error_only: $("pushErrorOnly").checked,
+    per_account: $("pushPerAccount").checked,
   };
   config.push.channels = Array.from(
     document.querySelectorAll("[data-push-provider]"),
@@ -916,14 +1237,29 @@ function collectConfig() {
   config.captcha.enable = config.captcha.channels.some(
     (channel) => channel.enable,
   );
+  config.ip_guard = {
+    ...(config.ip_guard || {}),
+    enable: $("ipGuardEnable").checked,
+    check_interval: Math.max(30, Number($("ipGuardInterval").value || 5) * 60),
+    max_wait: Math.max(0, Number($("ipGuardMaxWait").value || 0) * 60),
+    notify: $("ipGuardNotify").checked,
+    on_error: $("ipGuardBlockOnError").checked ? "block" : "allow",
+  };
   config.shop_exchange = collectShopExchange();
   config.accounts = Array.from(document.querySelectorAll(".account-row")).map(
-    (row) => {
+    (row, index) => {
       const item = {};
       row.querySelectorAll("[data-field]").forEach((field) => {
         item[field.dataset.field] = field.value.trim();
       });
       item.cloud_games = collectAccountCloudGames(row);
+      // 账号级 chip 同样有「被总开关禁用」的情况，取原值做兜底
+      const previousTasks = config.accounts?.[index]?.tasks || {};
+      const accountTasks = collectAccountTasks(row, {
+        games: previousTasks.games?.enabled,
+        cloud_games: previousTasks.cloud_games?.enabled,
+      });
+      if (accountTasks) item.tasks = accountTasks;
       item.name = (item.name || "").slice(0, 10);
       item._draft = row.dataset.draft === "1";
       return item;
@@ -959,10 +1295,13 @@ function collectCaptchaChannel(row) {
   const channel = emptyCaptchaChannel(provider);
   channel.enable = Boolean(toggle?.checked);
   row.querySelectorAll("[data-captcha-field]").forEach((field) => {
-    if (field.dataset.captchaField === "timeout") {
-      channel.timeout = Number(field.value || 60);
+    const key = field.dataset.captchaField;
+    if (key === "timeout" || key === "max_attempts") {
+      channel[key] = Number(field.value || channel[key] || 0);
+    } else if (key === "headless") {
+      channel[key] = field.value !== "false";
     } else {
-      channel[field.dataset.captchaField] = field.value.trim();
+      channel[key] = field.value.trim();
     }
   });
   return channel;
@@ -981,6 +1320,38 @@ function collectAccountCloudGames(row) {
   };
 }
 
+// 把「最多抢几秒 / 最多隔几秒发一次」翻译成人话。
+// 语义：间隔是在 0 ~ 填的那个数 之间随机取（填的数就是上限），所以平均间隔 ≈ 上限/2；
+// 每次尝试还要叠加一次网络往返（约 0.2s）。
+function shopRetryAttemptRange(seconds, interval) {
+  const window = Number(seconds);
+  if (!Number.isFinite(window) || window <= 0) return null;
+  const gap = Number(interval);
+  const maxGap = Number.isFinite(gap) && gap > 0 ? gap : 0.4;
+  const rtt = 0.2;
+  return {
+    maxGap: Math.round(maxGap * 1000) / 1000,
+    typical: Math.max(1, Math.round(window / (maxGap / 2 + rtt))),
+    fewest: Math.max(1, Math.floor(window / (maxGap + rtt))),
+    most: Math.max(1, Math.floor(window / rtt)),
+  };
+}
+
+function renderShopRetryHint() {
+  const node = $("shopRetryHint");
+  if (!node) return;
+  const seconds = $("shopRetrySeconds")?.value ?? "";
+  const interval = $("shopRetryInterval")?.value ?? "";
+  const range = shopRetryAttemptRange(seconds, interval);
+  if (!range) {
+    node.textContent = "当前：到点后只发一次请求，不重试。";
+    return;
+  }
+  node.textContent =
+    `当前：开抢后最多坚持 ${Number(seconds)} 秒，每两次之间在 0~${range.maxGap} 秒之间随机，` +
+    `平均大约发 ${range.typical} 次请求（最少 ${range.fewest} 次，最多 ${range.most} 次）。`;
+}
+
 function renderShopConfig() {
   if (!$("shopEnable")) return;
   const shop = config.shop_exchange || {};
@@ -988,12 +1359,13 @@ function renderShopConfig() {
   $("shopRetrySeconds").value = shop.retry_seconds ?? 20;
   $("shopRetryInterval").value = shop.retry_interval ?? 0.4;
   $("shopPush").checked = Boolean(shop.push ?? false);
+  renderShopRetryHint();
   if ($("shopGoodsMetric")) {
     const total = shopGoods.length;
     const totalPages = Math.max(1, Math.ceil(total / SHOP_PAGE_SIZE));
     $("shopGoodsMetric").textContent = shopGoodsLoading
         ? "加载中"
-        : `${total} 件 (共 ${totalPages} 页)`;
+        : `${total} 件`;
   }
   if ($("shopPlansMetric"))
     $("shopPlansMetric").textContent = String((shop.plans || []).length);
@@ -1024,35 +1396,31 @@ function renderShopGoodsLoadingState() {
   button.classList.toggle("is-loading", shopGoodsLoading);
   if (label) label.textContent = shopGoodsLoading ? "加载中" : "刷新商品";
 }
-
 function renderShopGoods() {
   const list = $("shopGoods");
   if (!list) return;
 
-  // 加载中状态
   if (shopGoodsLoading) {
     list.innerHTML = `<div class="empty-state shop-empty shop-loading">
         <span class="qr-loading" aria-hidden="true"></span>
         <strong>商品加载中</strong>
         <span>正在获取商品图片、兑换时间、库存和限购信息。</span>
       </div>`;
-    renderShopPagination(0);
+    renderShopPagination();
     return;
   }
 
-  // 计算分页
-  const total = shopGoods.length;
+  const filtered = getFilteredGoods();
+  const total = filtered.length;
   const totalPages = Math.max(1, Math.ceil(total / SHOP_PAGE_SIZE));
   if (shopCurrentPage > totalPages) shopCurrentPage = totalPages;
-
   const start = (shopCurrentPage - 1) * SHOP_PAGE_SIZE;
   const end = Math.min(start + SHOP_PAGE_SIZE, total);
-  const pageGoods = shopGoods.slice(start, end);
+  const pageGoods = filtered.slice(start, end);
 
-  // 渲染商品卡片
   if (pageGoods.length) {
     list.innerHTML = pageGoods
-        .map((good, index) => shopGoodCard(good, start + index))  // 传递全局索引
+        .map((good) => shopGoodCard(good, shopGoodCardIndex(good)))
         .join("");
   } else {
     list.innerHTML = `<div class="empty-state shop-empty">
@@ -1062,81 +1430,87 @@ function renderShopGoods() {
   }
 
   bindShopGoodsEvents();
-  renderShopPagination(totalPages);
+  renderShopPagination();  // 无需传参，内部自己计算
 }
 
-function renderShopPagination(totalPages) {
-  // 查找或创建分页容器
-  let container = $("shopPagination");
+function renderShopPagination() {
+  const container = $("shopPagination");
   const list = $("shopGoods");
 
   if (!container && list) {
-    container = document.createElement("div");
-    container.id = "shopPagination";
-    container.className = "shop-pagination";
-    list.parentNode.insertBefore(container, list.nextSibling);
+    const newContainer = document.createElement("div");
+    newContainer.id = "shopPagination";
+    newContainer.className = "shop-pagination";
+    list.parentNode.insertBefore(newContainer, list.nextSibling);
   }
 
-  if (!container) return;
+  const pagination = $("shopPagination");
+  if (!pagination) return;
 
-  // 商品总数 <= 每页大小 或 无数据时，隐藏分页
-  if (shopGoods.length <= SHOP_PAGE_SIZE || shopGoods.length === 0) {
-    container.innerHTML = "";
-    container.style.display = "none";
+  // ----- 基于过滤后的数据计算 -----
+  const filtered = getFilteredGoods();
+  const total = Math.max(1, Math.ceil(filtered.length / SHOP_PAGE_SIZE));
+  const current = Math.min(shopCurrentPage, total);
+
+  if (filtered.length <= SHOP_PAGE_SIZE || filtered.length === 0) {
+    pagination.innerHTML = "";
+    pagination.style.display = "none";
+    if (shopCurrentPage !== 1) shopCurrentPage = 1;
     return;
   }
-  container.style.display = "flex";
+  pagination.style.display = "flex";
 
-  // 构建分页 HTML
-  const current = shopCurrentPage;
-  const total = totalPages;
+  // 确保当前页合法
+  if (shopCurrentPage > total) shopCurrentPage = total;
+  const effectiveCurrent = shopCurrentPage;
 
+  // ----- 构建页码按钮（与之前相同）-----
   let html = `
-    <button class="ghost page-btn" data-page="prev" ${current <= 1 ? 'disabled' : ''}>
+    <button class="ghost page-btn" data-page="prev" ${effectiveCurrent <= 1 ? 'disabled' : ''}>
       <svg width="10" height="10" viewBox="0 0 10 10"><path d="M7 1L3 5l4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg>
     </button>
   `;
 
-  // 页码列表（智能显示：首尾 + 当前页前后各2页）
-  const pages = getVisiblePages(current, total);
+  const pages = getVisiblePages(effectiveCurrent, total);
   for (const p of pages) {
     if (p === "...") {
       html += `<span class="page-ellipsis">…</span>`;
     } else {
-      html += `<button class="ghost page-btn ${p === current ? 'is-active' : ''}" data-page="${p}">${p}</button>`;
+      html += `<button class="ghost page-btn ${p === effectiveCurrent ? 'is-active' : ''}" data-page="${p}">${p}</button>`;
     }
   }
 
   html += `
-    <button class="ghost page-btn" data-page="next" ${current >= total ? 'disabled' : ''}>
+    <button class="ghost page-btn" data-page="next" ${effectiveCurrent >= total ? 'disabled' : ''}>
       <svg width="10" height="10" viewBox="0 0 10 10"><path d="M3 1l4 4-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg>
     </button>
-    <span class="page-info">${current} / ${total}</span>
+    <span class="page-info">${effectiveCurrent} / ${total}</span>
   `;
 
-  container.innerHTML = html;
+  pagination.innerHTML = html;
 
-  // 绑定事件
-  container.querySelectorAll("[data-page]").forEach((btn) => {
+
+  // ----- 绑定事件 -----
+  pagination.querySelectorAll("[data-page]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const page = btn.dataset.page;
-      if (page === "prev" && current > 1) {
-        shopCurrentPage = current - 1;
-      } else if (page === "next" && current < total) {
-        shopCurrentPage = current + 1;
-      } else if (page !== "prev" && page !== "next") {
-        shopCurrentPage = Number(page);
-      } else {
-        return;
+      let newPage = effectiveCurrent;
+      if (page === "prev" && effectiveCurrent > 1) newPage = effectiveCurrent - 1;
+      else if (page === "next" && effectiveCurrent < total) newPage = effectiveCurrent + 1;
+      else if (page !== "prev" && page !== "next") newPage = Number(page);
+      else return;
+      if (newPage !== effectiveCurrent) {
+        shopCurrentPage = newPage;
+        renderShopGoods();
+        scrollToGoodsList();
       }
-      renderShopGoods();
-      // 滚动到商品列表顶部
-      const listEl = $("shopGoods");
-      if (listEl) listEl.scrollIntoView({ behavior: "smooth", block: "start" });
     });
   });
+  function scrollToGoodsList() {
+    const listEl = $("shopGoods");
+    if (listEl) listEl.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 }
-
 // 辅助函数：计算可见页码列表
 function getVisiblePages(current, total) {
   const maxVisible = 7;  // 最多显示7个页码
@@ -1157,6 +1531,14 @@ function getVisiblePages(current, total) {
   pages.push(total);
 
   return pages;
+}
+
+// 卡片上带的下标必须是这件商品在 shopGoods（未过滤、未分页）里的真实位置。
+// 之前用的是过滤后的小标（start + index），而点击时回查的是 shopGoods[...]：
+// 默认「全部」筛选下两者恰好相等，所以一直没暴露；一旦切到「已售罄 / 可兑换」，
+// 点 A 卡片会拿 B 商品的 goods_id 去加计划或兑换（可能兑掉已售罄/错误的商品）。
+function shopGoodCardIndex(good) {
+  return shopGoods.indexOf(good);
 }
 
 function shopGoodCard(good, index) {
@@ -1231,7 +1613,6 @@ function renderShopPlans() {
 function shopPlanRow(plan, index) {
   const accounts = config.accounts || [];
   const paused = plan.enable === false;
-  const running = Boolean(shopRunningProgress[String(index)]);
   const open = shopOpenPlans.has(String(index)) ? "open" : "";
   const roleDisplay = shopRoleDisplay(plan);
   const serverDisplay = shopServerDisplay(plan);
@@ -1249,10 +1630,10 @@ function shopPlanRow(plan, index) {
       <summary class="shop-plan-summary">
         <span class="shop-plan-title">
           <strong>${escapeHtml(plan.goods_name || plan.goods_id)}</strong>
-          <small>${escapeHtml(shopPlanStatus(plan, index))}</small>
+          <small>${escapeHtml(shopPlanStatus(plan))}</small>
         </span>
         <span class="shop-plan-badges">
-          <span class="plan-badge ${running ? "running" : paused ? "paused" : "active"}">${running ? "兑换中" : paused ? "已暂停" : "自动"}</span>
+          <span class="plan-badge ${paused ? "paused" : "active"}">${paused ? "已暂停" : "自动"}</span>
           <span class="disclosure" aria-hidden="true"></span>
         </span>
       </summary>
@@ -1319,7 +1700,7 @@ function shopPlanRow(plan, index) {
       <input data-shop-plan-field="last_attempt_key" type="hidden" value="${escapeAttr(plan.last_attempt_key || "")}" />
       <input data-shop-plan-field="last_run" type="hidden" value="${escapeAttr(plan.last_run || "")}" />
       <div class="shop-plan-foot">
-        <span>${escapeHtml(shopPlanStatus(plan, index))}</span>
+        <span>${escapeHtml(shopPlanStatus(plan))}</span>
         <button class="ghost" type="button" data-shop-plan-now="${index}" title="立即执行该兑换计划">
           <svg><use href="#i-play"></use></svg>
           <span>立即兑换</span>
@@ -1330,20 +1711,32 @@ function shopPlanRow(plan, index) {
   `;
 }
 
+function shopGoodByCardIndex(rawIndex) {
+  const index = Number(rawIndex);
+  if (!Number.isInteger(index) || index < 0 || index >= shopGoods.length) return null;
+  return shopGoods[index] || null;
+}
+
 function bindShopGoodsEvents() {
   document.querySelectorAll("[data-shop-add]").forEach((button) => {
-    button.addEventListener("click", () =>
-      withButtonLoading(button, "添加中", () =>
-        addShopPlan(shopGoods[Number(button.dataset.shopAdd)]),
-      ),
-    );
+    button.addEventListener("click", () => {
+      const good = shopGoodByCardIndex(button.dataset.shopAdd);
+      if (!good) {
+        showToast("商品数据已更新，请重新刷新商品列表");
+        return;
+      }
+      withButtonLoading(button, "添加中", () => addShopPlan(good));
+    });
   });
   document.querySelectorAll("[data-shop-now]").forEach((button) => {
-    button.addEventListener("click", () =>
-      exchangeGoodNow(shopGoods[Number(button.dataset.shopNow)]).catch(
-        (error) => showToast(error.message),
-      ),
-    );
+    button.addEventListener("click", () => {
+      const good = shopGoodByCardIndex(button.dataset.shopNow);
+      if (!good) {
+        showToast("商品数据已更新，请重新刷新商品列表");
+        return;
+      }
+      exchangeGoodNow(good).catch((error) => showToast(error.message));
+    });
   });
 }
 
@@ -1469,6 +1862,10 @@ async function loadShopGoods() {
   shopSelectedGame = game;
   shopGoodsLoading = true;
   renderShopConfig();
+  shopFilterStatus = '';
+  const filterSelect = document.getElementById("shopStatusFilter");
+  if (filterSelect) filterSelect.value = '';
+      shopCurrentPage = 1;
   try {
     const data = await api(`/api/shop/goods?game=${encodeURIComponent(game)}`);
     if (loadSeq !== shopGoodsLoadSeq) return;
@@ -1903,15 +2300,7 @@ async function withButtonLoading(button, loadingText, task) {
   }
 }
 
-function shopPlanStatus(plan, index) {
-  const progress = shopRunningProgress[String(index)];
-  if (progress) {
-    const attempt = Number(progress.attempt || 0);
-    const message = progress.message || "兑换中";
-    return attempt > 0
-      ? `兑换中 · 第 ${attempt} 次尝试 · ${message}`
-      : `兑换中 · ${message}`;
-  }
+function shopPlanStatus(plan) {
   if (plan.last_result) {
     return `${plan.enable === false ? "已暂停，" : ""}最近结果：${plan.last_result}`;
   }
@@ -2051,7 +2440,6 @@ async function refreshStatus() {
 
   const runningPlans = new Set(exchangeScheduler.running_plans || []);
   const runningCount = exchangeScheduler.running_count ?? runningPlans.size;
-  shopRunningProgress = exchangeScheduler.running_progress || {};
 
   if ($("shopScheduleMetric")) {
     $("shopScheduleMetric").textContent = runningCount > 0
@@ -2081,6 +2469,13 @@ async function refreshStatus() {
   }
   renderLoginSlot(login);
   $("runBtn").disabled = Boolean(scheduler.running);
+  const stopBtn = $("stopBtn");
+  if (stopBtn) {
+    const stopping = Boolean(scheduler.stopping);
+    stopBtn.disabled = !scheduler.running || stopping;
+    const label = stopBtn.querySelector("span");
+    if (label) label.textContent = stopping ? "正在停止…" : "停止";
+  }
   document.querySelectorAll("[data-login]").forEach((button) => {
     button.disabled = Boolean(login.running);
   });
@@ -2722,6 +3117,12 @@ async function runNow() {
   await refreshStatus();
 }
 
+async function stopRunNow() {
+  const response = await api("/api/run/stop", { method: "POST", body: "{}" });
+  showToast(response.ok ? "已发送停止指令，正在中断" : "已停止");
+  await refreshStatus();
+}
+
 async function testPushNow() {
   await autoSaveConfig();
   const response = await api("/api/push/test", {
@@ -2730,6 +3131,79 @@ async function testPushNow() {
   });
   showToast(response.result || "推送测试已完成");
   await refreshStatus();
+}
+
+async function checkCaptchaEnv() {
+  const resultNode = $("captchaCheckResult");
+  if (resultNode) resultNode.textContent = "自检中：正在启动浏览器…";
+  const data = await api("/api/captcha/check", { method: "POST", body: "{}" });
+  const lines = [];
+  if (data.ok) {
+    lines.push(`✅ 本地识别环境可用（${data.browser || "?"}，耗时 ${data.seconds ?? "?"} 秒）`);
+  } else {
+    lines.push(`❌ 本地识别环境不可用：${data.error || "未知错误"}`);
+    lines.push("签到触发验证码时会识别失败；可改用打码平台渠道。");
+  }
+  const text = lines.join(" ");
+  if (resultNode) resultNode.textContent = text;
+  showToast(text);
+}
+
+function renderScheduleSummary() {
+  const node = $("scheduleSummary");
+  if (!node) return;
+  const gap = config.account_gap || {};
+  const enabled = gap.enable ?? true;
+  const low = Number(gap.min_minutes ?? 60);
+  const high = Number(gap.max_minutes ?? 120);
+  let gapText;
+  if (!enabled) {
+    gapText = "账号间隔已关闭";
+  } else if (Math.max(low, high) <= 0) {
+    gapText = "账号间隔 0 分钟";
+  } else {
+    gapText = `账号间隔 ${Math.min(low, high)}~${Math.max(low, high)} 分钟`;
+  }
+  node.textContent = `自动运行 · ${gapText}`;
+}
+
+function renderIpGuardSummary() {
+  const node = $("ipGuardSummary");
+  if (!node) return;
+  const guard = config.ip_guard || {};
+  if (!guard.enable) {
+    node.textContent = "未开启，境外 IP 也会照常签到";
+    return;
+  }
+  const interval = Math.max(1, Math.round((guard.check_interval ?? 300) / 60));
+  const hours = Math.round((guard.max_wait ?? 0) / 3600);
+  node.textContent = `每 ${interval} 分钟复查 · 最多等 ${hours ? `${hours} 小时` : "不限"}`;
+}
+
+async function checkIpNow() {
+  const node = $("ipCheckResult");
+  if (node) node.textContent = "检测中…";
+  const data = await api("/api/ip/check", { method: "POST", body: "{}" });
+  const domestic = data.domestic || {};
+  const overseas = data.overseas || {};
+  const lines = [];
+  if (data.split) {
+    lines.push(`⚠️ 检测到分流代理：国内直连走 ${domestic.ip || "?"}${
+      domestic.region ? `（${domestic.region}）` : ""
+    }，境外流量走 ${overseas.ip || "?"}${overseas.region ? `（${overseas.region}）` : ""}`);
+    lines.push("米游社是境外服务，走的是代理那条路，会触发异地风控，签到已暂停。");
+  } else if (data.blocked) {
+    lines.push(`🚫 出口在境外：${data.ip || "?"}${data.region ? ` · ${data.region}` : ""}`);
+    lines.push("签到已暂停，关掉 VPN / 代理后会自动继续。");
+  } else if (data.mainland === true) {
+    lines.push(`✅ 出口在中国大陆：${domestic.ip || "?"}${domestic.region ? ` · ${domestic.region}` : ""}`);
+  } else {
+    lines.push(`⚠️ 属地无法判断：${data.reason || data.error || "查询失败"}`);
+  }
+  if (data.proxy) lines.push(`系统代理：${data.proxy}`);
+  const text = lines.join(" ");
+  if (node) node.textContent = text;
+  showToast(text);
 }
 
 function addAccount() {
@@ -2962,6 +3436,14 @@ function bindEvents() {
     .forEach((control) => {
       control.addEventListener("click", (event) => event.stopPropagation());
     });
+  const statusFilter = document.getElementById("shopStatusFilter");
+  if (statusFilter) {
+    statusFilter.addEventListener("change", () => {
+      shopFilterStatus = statusFilter.value;
+      shopCurrentPage = 1;          // 切换筛选时重置到第一页
+      renderShopGoods();
+    });
+  }
   document.addEventListener("change", (event) => {
     if (event.target?.matches?.("[data-autosave]")) {
       if (
@@ -2970,6 +3452,22 @@ function bindEvents() {
         event.target.id === "bbsTasks"
       ) {
         updateTaskDependencyState();
+      }
+      if (event.target?.matches?.("[data-account-tasks-panel] input")) {
+        updateAccountTaskInputs();
+      }
+      if (
+        event.target.id === "accountGapEnable" ||
+        event.target.id === "accountGapMin" ||
+        event.target.id === "accountGapMax"
+      ) {
+        renderScheduleSummary();
+      }
+      if (
+        event.target.id === "shopRetrySeconds" ||
+        event.target.id === "shopRetryInterval"
+      ) {
+        renderShopRetryHint();
       }
       scheduleAutoSave();
     }
@@ -2980,6 +3478,12 @@ function bindEvents() {
         'input[type="time"][data-autosave], input[type="datetime-local"][data-autosave], input[type="number"][data-autosave], input[type="text"][data-autosave], select[data-autosave], [data-account-cloud-token][data-autosave]',
       )
     ) {
+      if (
+        event.target.id === "shopRetrySeconds" ||
+        event.target.id === "shopRetryInterval"
+      ) {
+        renderShopRetryHint();
+      }
       scheduleAutoSave();
     }
   });
@@ -2991,8 +3495,24 @@ function bindEvents() {
   $("runBtn").addEventListener("click", () =>
     runNow().catch((error) => showToast(error.message)),
   );
+  $("stopBtn")?.addEventListener("click", () =>
+    stopRunNow().catch((error) => showToast(error.message)),
+  );
   $("pushTestBtn")?.addEventListener("click", () =>
     testPushNow().catch((error) => showToast(error.message)),
+  );
+  $("captchaCheckBtn")?.addEventListener("click", () =>
+    checkCaptchaEnv().catch((error) => {
+      if ($("captchaCheckResult"))
+        $("captchaCheckResult").textContent = `自检失败：${error.message}`;
+      showToast(error.message);
+    }),
+  );
+  $("ipCheckBtn")?.addEventListener("click", () =>
+    checkIpNow().catch((error) => {
+      if ($("ipCheckResult")) $("ipCheckResult").textContent = `检测失败：${error.message}`;
+      showToast(error.message);
+    }),
   );
   $("logs").addEventListener("scroll", () => {
     logsPinnedToBottom = isScrolledNearBottom($("logs"));
@@ -3001,6 +3521,23 @@ function bindEvents() {
     event.preventDefault();
     event.stopPropagation();
     addAccount();
+  });
+  $("deviceRerollBtn")?.addEventListener("click", () => {
+    rerollDevice()
+      .then((device) =>
+        showToast(`已换成 ${device.name || "新设备"}（${device.model || ""}）`),
+      )
+      .catch((error) => showToast(error.message));
+  });
+  $("deviceApplyPresetBtn")?.addEventListener("click", () => {
+    const preset = $("devicePreset")?.value || "";
+    if (!preset) {
+      showToast("请先选择机型");
+      return;
+    }
+    rerollDevice(preset)
+      .then((device) => showToast(`已换成 ${device.name || preset}`))
+      .catch((error) => showToast(error.message));
   });
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.addEventListener("click", () => switchView(button.dataset.view));
@@ -3046,9 +3583,9 @@ function showAuthPage(passwordSet) {
   const shell = document.querySelector(".shell");
   shell.style.display = "none";
 
-  const subtitle = passwordSet ? "请输入访问密码" : "首次使用，请设置外网访问密码";
+  const subtitle = passwordSet ? "请输入访问密码" : "首次使用，请设置访问密码";
   const buttonText = passwordSet ? "登录" : "设置密码";
-  const inputPlaceholder = passwordSet ? "输入密码" : "设置密码（至少 8 位）";
+  const inputPlaceholder = passwordSet ? "输入密码" : "设置密码（至少 4 位）";
 
   const overlay = document.createElement("div");
   overlay.className = "auth-overlay";
@@ -3077,8 +3614,8 @@ function showAuthPage(passwordSet) {
       errorEl.textContent = "请输入密码";
       return;
     }
-    if (!passwordSet && password.length < 8) {
-      errorEl.textContent = "密码至少 8 位";
+    if (!passwordSet && password.length < 4) {
+      errorEl.textContent = "密码至少 4 位";
       return;
     }
     submitBtn.disabled = true;

@@ -12,6 +12,9 @@ from ..auth.login import refresh_cookie_token
 from ..core import captcha, crypto
 from ..core.http import ApiClient
 
+# 登录态失效的返回码：这两种必须报「失败」而不是「未绑定角色」
+LOGIN_FAILED_RETCODES = (-100, -101)
+
 
 class GameCheckin:
     def __init__(
@@ -62,7 +65,13 @@ class GameCheckin:
         skipped: list[str] = []
         self._add(messages, f"== {name} ==")
         self._add(messages, f"正在获取{name}绑定角色")
-        roles = self._get_roles(game)
+        roles, role_error = self._get_roles(game)
+        if role_error:
+            # 登录失效 / 接口报错必须计入失败，不能混进「没绑角色」的跳过里，
+            # 否则汇总成「成功 0，失败 0，跳过 1」，推送会谎报「任务完成」。
+            self._add(messages, f"{name} 获取绑定角色失败：{role_error}")
+            failed.append(f"{name} {role_error}")
+            return {"messages": messages, "success": success, "failed": failed, "skipped": skipped}
         if not roles:
             self._add(messages, "未找到绑定角色")
             skipped.append(f"{name}: 未找到绑定角色")
@@ -151,19 +160,30 @@ class GameCheckin:
         headers.update(game.get("extra_headers") or {})
         return headers
 
-    def _get_roles(self, game: dict[str, Any], retried: bool = False) -> list[dict[str, Any]]:
+    def _get_roles(self, game: dict[str, Any], retried: bool = False) -> tuple[list[dict[str, Any]], str]:
+        """返回 (角色列表, 失败原因)。
+
+        失败原因非空表示「这次查询本身失败了」（登录失效 / 接口报错），
+        和「接口正常、账号确实没绑角色」是两件事：后者只跳过，前者必须算失败。
+        """
         data = self.client.get_json(
             c.ACCOUNT_ROLES_URL,
             params={"game_biz": game["game_biz"]},
             headers=self._headers(game),
         )
-        if data.get("retcode") == -100 and not retried:
+        retcode = data.get("retcode")
+        if retcode == -100 and not retried:
             if refresh_cookie_token(self.client, self.account):
                 return self._get_roles(game, retried=True)
-        if data.get("retcode") != 0:
-            return []
-        roles = data.get("data", {}).get("list", [])
-        return roles if isinstance(roles, list) else []
+        if retcode in LOGIN_FAILED_RETCODES:
+            detail = str(data.get("message") or "登录失效")
+            return [], f"{detail}({retcode})，请重新扫码登录"
+        if retcode != 0:
+            detail = str(data.get("message") or "接口返回异常")
+            return [], f"{detail}({retcode})"
+        payload = data.get("data")
+        roles = payload.get("list") if isinstance(payload, dict) else []
+        return (roles if isinstance(roles, list) else []), ""
 
     def _get_awards(self, game: dict[str, Any]) -> list[dict[str, Any]]:
         data = self.client.get_json(
@@ -227,7 +247,7 @@ class GameCheckin:
         if not captcha.is_enabled(self.config):
             return None
         provider = captcha.active_provider_label(self.config)
-        self._add(messages, f"游戏社区签到触发验证码，正在调用{provider}识别({attempt}/{max_retries})")
+        self._add(messages, f"游戏社区签到触发验证码，正在调用{provider}({attempt}/{max_retries})")
         solution = captcha.solve_game_captcha(self.client, self.config, gt, challenge, self.emit)
         if not solution:
             self._add(messages, "游戏社区签到验证码识别失败，准备重新获取验证码")

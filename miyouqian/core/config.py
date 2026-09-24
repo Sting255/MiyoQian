@@ -10,22 +10,68 @@ from typing import Any
 
 import yaml
 
+from ..constants import BBS_FORUMS, GAMES
 from . import crypto
 
 SENSITIVE_ACCOUNT_FIELDS = ("cookie", "stuid", "stoken", "mid")
 SUPPORTED_CLOUD_GAME_KEYS = ("genshin", "zzz")
+SUPPORTED_GAME_KEYS = tuple(GAMES)
+# 账号间等待的上限：24 小时。再长就会把后面的账号推到第二天的定时任务上。
+MAX_ACCOUNT_GAP_MINUTES = 24 * 60
+SUPPORTED_FORUM_KEYS = tuple(str(key) for key in BBS_FORUMS)
+ACCOUNT_TASK_SECTIONS = ("features", "games", "cloud_games", "bbs")
+FEATURE_KEYS = ("game_checkin", "cloud_game_checkin", "bbs_tasks")
 
+DEVICE_PRESET_KEYS = ("name", "model")
+
+# 设备指纹预设。这些机型名与型号只作为请求头里的设备标识使用，
+# 更换后可以让同一个 IP 下的多账号看起来来自不同设备，降低被风控的概率。
+# 列表里都是市面上常见的安卓机型，可以在配置文件中自行增删。
 DEFAULT_DEVICE_PRESETS: list[dict[str, str]] = [
+    # 小米 / Redmi
     {"name": "Xiaomi 14", "model": "23127PN0CC"},
+    {"name": "Xiaomi 14 Pro", "model": "23116PN5BC"},
     {"name": "Xiaomi 13", "model": "2211133C"},
+    {"name": "Xiaomi 13 Pro", "model": "2210132C"},
+    {"name": "Xiaomi 12", "model": "2201123C"},
     {"name": "Redmi K70", "model": "2311DRK48C"},
+    {"name": "Redmi K70 Pro", "model": "23117RK66C"},
     {"name": "Redmi K60", "model": "23013RK75C"},
-    {"name": "OnePlus 12", "model": "PJD110"},
+    {"name": "Redmi Note 13 Pro", "model": "2312DRA50C"},
+    {"name": "Redmi Note 12 Turbo", "model": "23049RAD8C"},
+    # OPPO / OnePlus / realme
     {"name": "OPPO Find X7", "model": "PHZ110"},
+    {"name": "OPPO Find X6", "model": "PGFM10"},
+    {"name": "OPPO Reno11", "model": "PJH110"},
+    {"name": "OnePlus 12", "model": "PJD110"},
+    {"name": "OnePlus 11", "model": "PHB110"},
+    {"name": "OnePlus Ace 2", "model": "PHK110"},
+    {"name": "realme GT5", "model": "RMX3820"},
+    {"name": "realme GT Neo5", "model": "RMX3706"},
+    # vivo / iQOO
     {"name": "vivo X100", "model": "V2309A"},
+    {"name": "vivo X100 Pro", "model": "V2324A"},
+    {"name": "vivo X90", "model": "V2218A"},
+    {"name": "vivo S17", "model": "V2283A"},
+    {"name": "iQOO 12", "model": "V2307A"},
+    {"name": "iQOO Neo8", "model": "V2301A"},
+    # 荣耀 / 华为
     {"name": "HONOR 100", "model": "MAA-AN00"},
+    {"name": "HONOR Magic5", "model": "PGT-AN00"},
+    {"name": "HONOR 90", "model": "REA-AN00"},
     {"name": "HUAWEI Mate 60", "model": "BRA-AL00"},
+    {"name": "HUAWEI P60", "model": "LNA-AL00"},
+    {"name": "HUAWEI nova 11", "model": "GOA-AL80"},
+    # 三星 / 其他
     {"name": "Samsung Galaxy S23", "model": "SM-S9110"},
+    {"name": "Samsung Galaxy S23 Ultra", "model": "SM-S9180"},
+    {"name": "Samsung Galaxy S24", "model": "SM-S9210"},
+    {"name": "Samsung Galaxy A54", "model": "SM-A5460"},
+    {"name": "Meizu 20", "model": "M381Q"},
+    {"name": "nubia Z50", "model": "NX711J"},
+    {"name": "Google Pixel 8", "model": "GKWS6"},
+    {"name": "Google Pixel 7", "model": "GVU6C"},
+    {"name": "Nothing Phone (2)", "model": "A065"},
 ]
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -44,7 +90,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_retries": 3,
         "channels": [{"provider": "damagou", "enable": False, "userkey": "", "type": "", "timeout": 60}],
     },
+    "ip_guard": {
+        "enable": True,
+        "check_interval": 300,
+        "max_wait": 7200,
+        "notify": True,
+        "on_error": "allow",
+        "endpoints": [],
+    },
     "schedule": {"enable": False, "time": "09:00", "jitter_minutes": 45, "run_on_start": False},
+    # 账号之间的防风控随机等待（分钟）。默认 60~120 分钟，与旧版本硬编码的
+    # runner.ACCOUNT_GAP_RANGE = (3600, 7200) 一致。enable=false 或上下限都为 0
+    # 就表示所有账号连着跑、不等待。
+    "account_gap": {"enable": True, "min_minutes": 60, "max_minutes": 120},
     "games": {
         "enabled": ["genshin", "starrail", "zzz"],
         "black_list": {"genshin": [], "starrail": [], "zzz": []},
@@ -65,6 +123,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "push": {
         "enable": False,
         "error_only": False,
+        "per_account": False,
         "channels": [],
     },
     "shop_exchange": {
@@ -126,30 +185,67 @@ def merge_dict(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     return base
 
 
+def merge_device_presets(value: Any) -> list[dict[str, str]]:
+    """把内置机型预设合并进现有列表，保留用户自己添加的机型。"""
+    presets: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in list(value) if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        model = str(item.get("model") or "").strip()
+        if not name or not model or name in seen:
+            continue
+        seen.add(name)
+        presets.append({"name": name, "model": model})
+    for item in DEFAULT_DEVICE_PRESETS:
+        if item["name"] in seen:
+            continue
+        seen.add(item["name"])
+        presets.append(dict(item))
+    return presets or copy.deepcopy(DEFAULT_DEVICE_PRESETS)
+
+
+# 顶层段落 → 内置默认值。用于把「留空」和「写错类型」的段落拉回可用状态。
+SECTION_DEFAULTS: dict[str, Any] = {
+    key: value for key, value in DEFAULT_CONFIG.items() if isinstance(value, dict)
+}
+
+
 def normalize_config(config: dict[str, Any]) -> None:
+    # ---- 顶层段落兜底 ----------------------------------------------------
+    # YAML 里把键留空（`accounts:` / `device:`）读出来是 None，
+    # 而 setdefault 在「键已存在」时不会替换它，于是后面
+    # enumerate(None) / None.get(...) 直接崩；把段落写成字符串、列表也一样。
+    # 这里统一退回内置默认值，保证 normalize 之后每个段落都是期望的类型。
+    for key, default in SECTION_DEFAULTS.items():
+        if not isinstance(config.get(key), dict):
+            config[key] = copy.deepcopy(default)
+    accounts = config.get("accounts")
+    if isinstance(accounts, dict):
+        config["accounts"] = [accounts]
+    elif not isinstance(accounts, list):
+        config["accounts"] = []
+    # enable 留空时按默认「开启」处理，不能因为 None 是假值就整天不跑任务
+    raw_enable = config.get("enable")
+    config["enable"] = True if raw_enable is None else parse_bool(raw_enable)
+
     storage = config.setdefault("storage", {})
     storage.setdefault("data_dir", "data")
     storage.setdefault("credentials_file", "credentials.yaml")
     storage.setdefault("log_dir", "logs")
     storage.setdefault("log_file", "miyouqian.log")
     cloud_games = config.setdefault("cloud_games", {})
-    if not isinstance(cloud_games, dict):
-        cloud_games = {}
-        config["cloud_games"] = cloud_games
     cloud_games["enabled"] = normalize_cloud_game_enabled(cloud_games.get("enabled", SUPPORTED_CLOUD_GAME_KEYS))
-    accounts = config.setdefault("accounts", [])
-    if isinstance(accounts, dict):
-        config["accounts"] = [accounts]
     for index, account in enumerate(config["accounts"], start=1):
         account["name"] = str(account.get("name") or "")[:10]
         for field in SENSITIVE_ACCOUNT_FIELDS:
             account.setdefault(field, "")
+        normalize_account_tasks(account)
     device = config.setdefault("device", {})
     first_cookie = str(config["accounts"][0].get("cookie", "")) if config["accounts"] else ""
-    presets = device.setdefault("presets", copy.deepcopy(DEFAULT_DEVICE_PRESETS))
-    if not isinstance(presets, list) or not presets:
-        presets = copy.deepcopy(DEFAULT_DEVICE_PRESETS)
-        device["presets"] = presets
+    device["presets"] = merge_device_presets(device.get("presets"))
+    presets = device["presets"]
     if not device.get("name") or not device.get("model"):
         preset = random.choice([item for item in presets if isinstance(item, dict)] or DEFAULT_DEVICE_PRESETS)
         device["name"] = str(preset.get("name") or DEFAULT_DEVICE_PRESETS[0]["name"])
@@ -165,10 +261,14 @@ def normalize_config(config: dict[str, Any]) -> None:
         captcha["max_retries"] = max(int(captcha.get("max_retries") or 3), 1)
     except (TypeError, ValueError):
         captcha["max_retries"] = 3
+    normalize_ip_guard(config)
+    normalize_account_gap(config)
+    normalize_schedule(config)
     push = config.setdefault("push", {})
     push["channels"] = normalize_push_channels(push)
     push["enable"] = any(channel.get("enable") for channel in push["channels"])
     push["error_only"] = bool(push.get("error_only", False))
+    push["per_account"] = parse_bool(push.get("per_account", False))
     web = config.setdefault("web", {})
     web.setdefault("host", "127.0.0.1")
     web.setdefault("port", 5890)
@@ -265,18 +365,140 @@ def normalize_cloud_game_enabled(value: Any) -> list[str]:
     return enabled
 
 
+def normalize_game_enabled(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw_items: list[Any] = [value]
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = []
+    enabled: list[str] = []
+    for item in raw_items:
+        key = str(item or "").strip()
+        if key in SUPPORTED_GAME_KEYS and key not in enabled:
+            enabled.append(key)
+    return enabled
+
+
+def normalize_game_black_list(value: Any) -> dict[str, list[str]]:
+    black_list: dict[str, list[str]] = {}
+    for key, items in (value or {}).items():
+        game = str(key or "").strip()
+        if game not in SUPPORTED_GAME_KEYS:
+            continue
+        uids: list[str] = []
+        for item in items if isinstance(items, list) else []:
+            uid = str(item or "").strip()
+            if uid and uid not in uids:
+                uids.append(uid)
+        black_list[game] = uids
+    return black_list
+
+
+def normalize_forum_list(value: Any) -> list[int] | None:
+    if value is None:
+        return None
+    if isinstance(value, (str, int)):
+        raw_items: list[Any] = [value]
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        return []
+    forums: list[int] = []
+    for item in raw_items:
+        key = str(item or "").strip()
+        if key in SUPPORTED_FORUM_KEYS:
+            number = int(key)
+            if number not in forums:
+                forums.append(number)
+    return forums
+
+
+def normalize_account_tasks(account: dict[str, Any]) -> None:
+    """归一化账号级任务配置。只保留允许的字段，空配置会被移除（表示跟随全局）。"""
+    raw = account.get("tasks")
+    if not isinstance(raw, dict):
+        account.pop("tasks", None)
+        return
+    tasks: dict[str, Any] = {}
+
+    features = raw.get("features")
+    if isinstance(features, dict):
+        tasks["features"] = {
+            "game_checkin": parse_bool(features.get("game_checkin", True)),
+            "cloud_game_checkin": parse_bool(features.get("cloud_game_checkin", False)),
+            "bbs_tasks": parse_bool(features.get("bbs_tasks", False)),
+        }
+
+    games = raw.get("games")
+    if isinstance(games, dict):
+        section: dict[str, Any] = {}
+        if "enabled" in games:
+            section["enabled"] = normalize_game_enabled(games.get("enabled"))
+        black_list = games.get("black_list")
+        if isinstance(black_list, dict):
+            section["black_list"] = normalize_game_black_list(black_list)
+        if section:
+            tasks["games"] = section
+
+    cloud_games = raw.get("cloud_games")
+    if isinstance(cloud_games, dict) and "enabled" in cloud_games:
+        tasks["cloud_games"] = {"enabled": normalize_cloud_game_enabled(cloud_games.get("enabled"))}
+
+    bbs = raw.get("bbs")
+    if isinstance(bbs, dict):
+        section = {}
+        if "checkin" in bbs:
+            section["checkin"] = parse_bool(bbs.get("checkin", True))
+        forums = normalize_forum_list(bbs.get("forums"))
+        if forums is not None:
+            section["forums"] = forums
+        if section:
+            tasks["bbs"] = section
+
+    if any(tasks.get(section) for section in ACCOUNT_TASK_SECTIONS):
+        account["tasks"] = tasks
+    else:
+        account.pop("tasks", None)
+
+
+def account_has_tasks(account: dict[str, Any]) -> bool:
+    if not isinstance(account, dict):
+        return False
+    tasks = account.get("tasks")
+    return isinstance(tasks, dict) and any(tasks.get(section) for section in ACCOUNT_TASK_SECTIONS)
+
+
+def account_config(config: dict[str, Any], account: dict[str, Any]) -> dict[str, Any]:
+    """把账号级任务配置覆盖到全局配置上，返回该账号实际执行时使用的配置。"""
+    effective = copy.deepcopy(config)
+    if not account_has_tasks(account):
+        return effective
+    tasks = account["tasks"]
+    for section in ACCOUNT_TASK_SECTIONS:
+        value = tasks.get(section)
+        if not isinstance(value, dict):
+            continue
+        target = effective.get(section)
+        if not isinstance(target, dict):
+            target = {}
+            effective[section] = target
+        merge_dict(target, copy.deepcopy(value))
+    normalize_config(effective)
+    return effective
+
+
 PUSH_CHANNEL_FIELDS: dict[str, tuple[str, ...]] = {
     "pushplus": ("token", "topic"),
     "qq": ("push_url", "access_token", "send_id", "msg_type"),
-    "telegram": ("token", "chat_id", "api_url"),
+    "telegram": ("token", "chat_id"),
     "dingrobot": ("webhook", "secret"),
     "feishubot": ("webhook",),
-    "wecombot": ("webhook",),
     "email": ("smtp_host", "smtp_port", "smtp_user", "smtp_password", "mail_from", "mail_to", "smtp_ssl"),
 }
 
 def normalize_push_channels(push: dict[str, Any]) -> list[dict[str, Any]]:
-    allowed = {"pushplus", "telegram", "dingrobot", "feishubot", "wecombot", "email", "qq"}
+    allowed = {"pushplus", "telegram", "dingrobot", "feishubot", "email", "qq"}
     raw_channels = push.get("channels")
     if not isinstance(raw_channels, list):
         raw_channels = []
@@ -322,8 +544,111 @@ def should_keep_push_channel(channel: dict[str, Any]) -> bool:
     return False
 
 
+def normalize_ip_guard(config: dict[str, Any]) -> None:
+    """出口 IP 守卫：境外 IP 时暂停签到，等回到中国大陆再继续。"""
+    guard = config.setdefault("ip_guard", {})
+    if not isinstance(guard, dict):
+        guard = {}
+        config["ip_guard"] = guard
+    guard["enable"] = parse_bool(guard.get("enable", True))
+    try:
+        interval = max(int(guard.get("check_interval") or 300), 30)
+    except (TypeError, ValueError):
+        interval = 300
+    guard["check_interval"] = interval
+    try:
+        max_wait = max(int(guard.get("max_wait") or 0), 0)
+    except (TypeError, ValueError):
+        max_wait = 0
+    guard["max_wait"] = max_wait
+    guard["notify"] = parse_bool(guard.get("notify", True))
+    on_error = str(guard.get("on_error") or "allow").strip().lower()
+    guard["on_error"] = on_error if on_error in {"allow", "block"} else "allow"
+    endpoints: list[str] = []
+    raw = guard.get("endpoints") if isinstance(guard.get("endpoints"), list) else []
+    for item in raw:
+        url = str(item or "").strip()
+        if url.startswith(("http://", "https://")) and url not in endpoints:
+            endpoints.append(url)
+        if len(endpoints) >= 5:
+            break
+    guard["endpoints"] = endpoints
+
+
+def normalize_account_gap(config: dict[str, Any]) -> None:
+    """账号之间的防风控随机等待。
+
+    单位是分钟（网页里也是分钟，用户改起来直观）。range 取 [min, max] 闭区间内的
+    随机值；min > max 时自动交换；上限夹在 24 小时以内——再长就会把第二个账号
+    推到第二天的定时任务上去。
+    """
+    gap = config.setdefault("account_gap", {})
+    if not isinstance(gap, dict):
+        gap = {}
+        config["account_gap"] = gap
+    gap["enable"] = parse_bool(gap.get("enable", True))
+    low = clamp_gap_minutes(gap.get("min_minutes"), 60)
+    high = clamp_gap_minutes(gap.get("max_minutes"), 120)
+    if high < low:
+        low, high = high, low
+    gap["min_minutes"] = low
+    gap["max_minutes"] = high
+
+
+def clamp_gap_minutes(value: Any, default: int) -> int:
+    try:
+        minutes = int(float(value))
+    except (TypeError, ValueError):
+        return default
+    return min(max(minutes, 0), MAX_ACCOUNT_GAP_MINUTES)
+
+
+def normalize_schedule(config: dict[str, Any]) -> None:
+    """每日调度：把容易写错的写法拉回可用状态。
+
+    最容易踩的坑：`time: 09:00` 不加引号时，PyYAML 按 YAML 1.1 的「六十进制」
+    把它解析成整数 540（= 9×60 分钟）。原来自动调度会一路抛
+    「schedule.time 必须是 HH:MM 格式」，把调度线程直接搞死——线程一死自动签到
+    就永远不触发，而网页上还显示着「已启用」。这里把 0~1439 的整数还原成 HH:MM。
+    """
+    schedule = config.setdefault("schedule", {})
+    if not isinstance(schedule, dict):
+        schedule = {}
+        config["schedule"] = schedule
+    schedule["enable"] = parse_bool(schedule.get("enable", True))
+    schedule["run_on_start"] = parse_bool(schedule.get("run_on_start", False))
+    schedule["time"] = normalize_schedule_time(schedule.get("time"))
+    schedule["jitter_minutes"] = clamp_minutes(schedule.get("jitter_minutes"), 45, 720)
+
+
+def normalize_schedule_time(value: Any) -> str:
+    """`09:00` / `"9:00"` / 540（YAML 六十进制）都还原成 "09:00"。"""
+    default = str(DEFAULT_CONFIG["schedule"]["time"])
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        if 0 <= value < 24 * 60:
+            return f"{value // 60:02d}:{value % 60:02d}"
+        return default
+    text = str(value or "").strip()
+    parts = text.split(":")
+    if len(parts) == 2 and all(part.strip().isdigit() for part in parts):
+        hour, minute = int(parts[0]), int(parts[1])
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+    return default
+
+
+def clamp_minutes(value: Any, default: int, upper: int) -> int:
+    try:
+        minutes = int(float(value))
+    except (TypeError, ValueError):
+        return default
+    return min(max(minutes, 0), upper)
+
+
 def normalize_captcha_channels(captcha: dict[str, Any]) -> list[dict[str, Any]]:
-    allowed = {"damagou"}
+    allowed = {"damagou", "local"}
     raw_channels = captcha.get("channels")
     if not isinstance(raw_channels, list):
         raw_channels = []
@@ -344,15 +669,21 @@ def normalize_captcha_channels(captcha: dict[str, Any]) -> list[dict[str, Any]]:
             normalized_timeout: int | float = int(timeout) if timeout.is_integer() else timeout
         except (TypeError, ValueError):
             normalized_timeout = 60
-        channels.append(
-            {
-                "provider": provider,
-                "enable": parse_bool(raw.get("enable", captcha.get("enable", False))),
-                "userkey": str(raw.get("userkey") or ""),
-                "type": str(raw.get("type") or ""),
-                "timeout": normalized_timeout,
-            }
-        )
+        channel: dict[str, Any] = {
+            "provider": provider,
+            "enable": parse_bool(raw.get("enable", captcha.get("enable", False))),
+            "userkey": str(raw.get("userkey") or ""),
+            "type": str(raw.get("type") or ""),
+            "timeout": normalized_timeout,
+        }
+        if provider == "local":
+            channel["headless"] = parse_bool(raw.get("headless", True))
+            try:
+                channel["max_attempts"] = max(int(raw.get("max_attempts") or 5), 1)
+            except (TypeError, ValueError):
+                channel["max_attempts"] = 5
+            channel["model_path"] = str(raw.get("model_path") or "")
+        channels.append(channel)
     if not any(channel["provider"] == "damagou" for channel in channels):
         channels.append({"provider": "damagou", "enable": False, "userkey": "", "type": "", "timeout": 60})
     return channels

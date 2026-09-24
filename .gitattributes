@@ -1,0 +1,18 @@
+# 统一换行符：默认存 LF（仓库里现在也都是 LF，不会产生大面积 diff）
+* text=auto eol=lf
+
+# Windows 脚本必须 CRLF，否则某些环境执行会报错
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制文件别被当成文本处理
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.onnx binary
+*.pptx binary
+*.zip binary

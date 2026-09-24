@@ -15,6 +15,9 @@
       <symbol id="i-play" viewBox="0 0 24 24">
         <path d="M8 5v14l11-7z"></path>
       </symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24">
+        <rect x="7" y="7" width="10" height="10" rx="1.5"></rect>
+      </symbol>
       <symbol id="i-save" viewBox="0 0 24 24">
         <path
           d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"
@@ -51,6 +54,16 @@
       </symbol>
       <symbol id="i-x" viewBox="0 0 24 24">
         <path d="M18 6 6 18M6 6l12 12"></path>
+      </symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24">
+        <path d="M4 7h10M18 7h2"></path>
+        <path d="M4 17h3M11 17h9"></path>
+        <circle cx="16" cy="7" r="2"></circle>
+        <circle cx="9" cy="17" r="2"></circle>
+      </symbol>
+      <symbol id="i-device" viewBox="0 0 24 24">
+        <rect x="6" y="2.5" width="12" height="19" rx="2.5"></rect>
+        <path d="M10.5 18.5h3"></path>
       </symbol>
     </svg>
 
@@ -91,6 +104,10 @@
           <button class="primary" id="runBtn" type="button" title="立即执行">
             <svg><use href="#i-play"></use></svg>
             <span>立即执行</span>
+          </button>
+          <button class="ghost" id="stopBtn" type="button" title="停止正在执行的任务（运行中可用）" disabled>
+            <svg><use href="#i-stop"></use></svg>
+            <span>停止</span>
           </button>
         </div>
       </header>
@@ -147,6 +164,9 @@
                 </span>
                 <span class="disclosure" aria-hidden="true"></span>
               </summary>
+              <p class="panel-hint">
+                这里是所有账号的默认任务。某个账号想单独设置，点它卡片里的「任务配置」那一行即可。
+              </p>
               <div class="task-group" id="gameTaskGroup">
                 <label class="check-row task-switch">
                   <input id="gameCheckin" type="checkbox" data-autosave />
@@ -202,8 +222,49 @@
             <details class="panel">
               <summary>
                 <span>
+                  <strong>设备指纹</strong>
+                  <small id="deviceSummary">查看当前机型</small>
+                </span>
+                <span class="disclosure" aria-hidden="true"></span>
+              </summary>
+              <div class="device-current">
+                <div class="device-row">
+                  <span>当前机型</span>
+                  <strong id="deviceName">-</strong>
+                </div>
+                <div class="device-row">
+                  <span>设备 ID</span>
+                  <code id="deviceId">-</code>
+                </div>
+                <div class="device-row">
+                  <span>设备 FP</span>
+                  <code id="deviceFp">-</code>
+                </div>
+              </div>
+              <label class="device-select">
+                <span>机型预设</span>
+                <select id="devicePreset"></select>
+              </label>
+              <div class="device-actions">
+                <button class="ghost" id="deviceApplyPresetBtn" type="button">
+                  <svg><use href="#i-save"></use></svg>
+                  <span>使用该机型</span>
+                </button>
+                <button class="ghost" id="deviceRerollBtn" type="button">
+                  <svg><use href="#i-refresh"></use></svg>
+                  <span>随机换一个</span>
+                </button>
+              </div>
+              <p class="panel-hint">
+                换指纹会同时更换机型与设备 ID、设备 FP，用于降低同一网络下多账号被风控的概率，不会影响已经登录的凭证。
+              </p>
+            </details>
+
+            <details class="panel">
+              <summary>
+                <span>
                   <strong>每日调度</strong>
-                  <small>自动运行</small>
+                  <small id="scheduleSummary">自动运行</small>
                 </span>
                 <span class="disclosure" aria-hidden="true"></span>
               </summary>
@@ -232,6 +293,39 @@
                 <input id="runOnStart" type="checkbox" data-autosave />
                 <span>启动后执行一次</span>
               </label>
+              <hr class="panel-divider" />
+              <label class="check-row">
+                <input id="accountGapEnable" type="checkbox" data-autosave />
+                <span>账号之间随机等待（防风控）</span>
+              </label>
+              <small class="panel-hint">
+                多账号时，跑完一个账号先等一会儿再跑下一个，让它们看起来像不同时段各自操作的。
+                想连着跑就把上面的开关关掉，或者把两个值都填 0。
+              </small>
+              <div class="form-grid two compact">
+                <label>
+                  <span>最短等待（分钟）</span>
+                  <input
+                    id="accountGapMin"
+                    type="number"
+                    min="0"
+                    max="1440"
+                    step="1"
+                    data-autosave
+                  />
+                </label>
+                <label>
+                  <span>最长等待（分钟）</span>
+                  <input
+                    id="accountGapMax"
+                    type="number"
+                    min="0"
+                    max="1440"
+                    step="1"
+                    data-autosave
+                  />
+                </label>
+              </div>
             </details>
 
             <details class="panel">
@@ -256,6 +350,10 @@
               <label class="check-row">
                 <input id="pushErrorOnly" type="checkbox" data-autosave />
                 <span>仅失败时推送</span>
+              </label>
+              <label class="check-row">
+                <input id="pushPerAccount" type="checkbox" data-autosave />
+                <span>每跑完一个账号就推送一次（多账号时不用等全部跑完）</span>
               </label>
               <div class="push-channel-list" id="pushChannels"></div>
             </details>
@@ -282,6 +380,82 @@
                 </label>
               </div>
               <div class="push-channel-list" id="captchaChannels"></div>
+              <div class="section-toolbar">
+                <button
+                  class="ghost"
+                  id="captchaCheckBtn"
+                  type="button"
+                  title="真实拉起一次 Chrome 并打开识别页面，检查本地识别环境是否可用"
+                >
+                  <svg><use href="#i-play"></use></svg>
+                  <span>环境自检（本地识别）</span>
+                </button>
+              </div>
+              <p class="panel-hint" id="captchaCheckResult">
+                「本地识别」需要本机装有 Chrome / Edge：自检会真实启动一次浏览器并打开识别测试页，
+                几秒内完成，不碰账号、不下载模型。装了 Docker 的服务器里通常没有浏览器，会显示失败原因。
+              </p>
+            </details>
+
+            <details class="panel">
+              <summary>
+                <span>
+                  <strong>IP 防护</strong>
+                  <small id="ipGuardSummary">境外 IP 时暂停签到</small>
+                </span>
+                <span class="disclosure" aria-hidden="true"></span>
+              </summary>
+              <label class="check-row">
+                <input id="ipGuardEnable" type="checkbox" data-autosave />
+                <span>开启：出口 IP 不在中国大陆时暂停签到</span>
+              </label>
+              <div class="form-grid two">
+                <label>
+                  <span>复查间隔（分钟）</span>
+                  <input
+                    id="ipGuardInterval"
+                    type="number"
+                    min="1"
+                    max="120"
+                    step="1"
+                    data-autosave
+                  />
+                </label>
+                <label>
+                  <span>最长等待（分钟）</span>
+                  <input
+                    id="ipGuardMaxWait"
+                    type="number"
+                    min="0"
+                    max="1440"
+                    step="10"
+                    data-autosave
+                  />
+                </label>
+              </div>
+              <label class="check-row">
+                <input id="ipGuardNotify" type="checkbox" data-autosave />
+                <span>暂停 / 恢复时推送通知</span>
+              </label>
+              <label class="check-row">
+                <input id="ipGuardBlockOnError" type="checkbox" data-autosave />
+                <span>查询失败时按境外处理（默认放行）</span>
+              </label>
+              <div class="section-toolbar">
+                <button
+                  class="ghost"
+                  id="ipCheckBtn"
+                  type="button"
+                  title="立即检测当前公网出口 IP 与归属地"
+                >
+                  <svg><use href="#i-play"></use></svg>
+                  <span>立即检测出口 IP</span>
+                </button>
+              </div>
+              <p class="panel-hint" id="ipCheckResult">
+                会分别检测「国内直连」和「境外流量」两条链路的出口 IP：分流模式（规则模式）的代理下，
+                米游社作为境外服务走的是代理那条路，只看国内出口会漏判。
+              </p>
             </details>
           </div>
 
@@ -328,21 +502,24 @@
                   <p>商品图片、兑换时间、库存、价格与限购信息</p>
                 </div>
                 <div class="shop-tools">
-                  <div class="select-wrapper">
+                  <div class="select-wrapper" style="width: 35%; flex: 0 0 auto;">
                     <select id="shopGameFilter" aria-label="商品分区"></select>
                     <svg class="select-arrow" width="12" height="8" aria-hidden="true">
                       <use href="#arrow-down"/>
                     </svg>
                   </div>
-                </div>
-                <div class="shop-tools">
-
-                  <button
-                          class="ghost"
-                          id="shopRefreshBtn"
-                          type="button"
-                          title="刷新商品"
-                  >
+                  <!-- 新增状态筛选 -->
+                  <div class="select-wrapper" style="width: 25%; flex: 0 0 auto;">
+                    <select id="shopStatusFilter" aria-label="商品状态">
+                      <option value="">全部</option>
+                      <option value="sold_out">已售罄</option>
+                      <option value="available">可兑换</option>
+                    </select>
+                    <svg class="select-arrow" width="12" height="8" aria-hidden="true">
+                      <use href="#arrow-down"/>
+                    </svg>
+                  </div>
+                  <button class="ghost" id="shopRefreshBtn" type="button" title="刷新商品">
                     <svg><use href="#i-refresh"></use></svg>
                     <span>刷新商品</span>
                   </button>
@@ -364,9 +541,15 @@
                 <input id="shopEnable" type="checkbox" data-autosave />
                 <span>启用商品自动兑换</span>
               </label>
+              <small class="panel-hint">
+                商品开卖的瞬间会连着发兑换请求：<strong>抢到就立刻停</strong>；
+                一直没抢到就坚持到「最多抢几秒」用完为止。
+                每两次之间会随机等一小会儿，<strong>最长不超过</strong>「最多隔几秒发一次」——
+                填 0.3 就是 0~0.3 秒之间随机（加随机是为了别让节奏太机械）。
+              </small>
               <div class="form-grid two compact">
                 <label>
-                  <span>到点后重试秒数</span>
+                  <span>最多抢几秒</span>
                   <input
                     id="shopRetrySeconds"
                     type="number"
@@ -377,7 +560,7 @@
                   />
                 </label>
                 <label>
-                  <span>失败重试间隔</span>
+                  <span>最多隔几秒发一次</span>
                   <input
                     id="shopRetryInterval"
                     type="number"
@@ -388,6 +571,7 @@
                   />
                 </label>
               </div>
+              <small class="panel-hint" id="shopRetryHint"></small>
               <label class="check-row" style="margin-top: 12px">
                 <input id="shopPush" type="checkbox" data-autosave />
                 <span>发送兑换结果推送（复用签到推送配置）</span>

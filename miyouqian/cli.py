@@ -20,7 +20,7 @@ from .core.config import (
 )
 from .core.http import ApiClient
 from .core.logs import append_log, configure_logger, format_line
-from .service.notifier import send_task_push
+from .service.notifier import push_run_result
 from .service.runner import run_tasks
 
 
@@ -134,10 +134,12 @@ def command_run(
         ),
     )
     append_log(log_file, format_line("签到任务执行完成", "cli"), component="cli")
-    push_result = send_task_push(config, task_lines)
+    success, push_result = push_run_result(config, task_lines)
     if push_result:
         append_log(log_file, format_line(push_result, "push"), component="push")
-    return 0
+    # 退出码要反映任务结果：cron / CI / 脚本调用方靠它决定要不要告警。
+    # （以前恒为 0，签到失败时调用方完全无感。）
+    return 0 if success else 1
 
 
 def command_serve(config_path: pathlib.Path, host: str | None, port: int | None) -> int:
@@ -183,7 +185,7 @@ def command_show(config_path: pathlib.Path) -> int:
     print(f"凭证文件: {credentials_path(config_path, config).resolve()}")
     print(f"日志文件: {log_path(config_path, config).resolve()}")
     web = config.get("web", {})
-    print(f"Web 控制台（配置文件中的值，启动时可被命令行参数覆盖）: {web.get('host', '127.0.0.1')}:{web.get('port', 5890)}")
+    print(f"Web 控制台: {web.get('host', '127.0.0.1')}:{web.get('port', 5890)}")
     return 0
 
 

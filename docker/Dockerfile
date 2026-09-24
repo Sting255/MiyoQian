@@ -22,8 +22,6 @@ COPY miyouqian/ ./miyouqian/
 COPY main.py .
 COPY config.example.yaml .
 COPY docker/entrypoint.sh /entrypoint.sh
-# 对entrypoint.sh做兼容性修复，防止windows环境下因CRLF问题报错。
-RUN sed -i 's/\r$//' /entrypoint.sh
 
 RUN groupadd --system myq \
     && useradd --system --gid myq --home-dir /app --shell /usr/sbin/nologin myq \

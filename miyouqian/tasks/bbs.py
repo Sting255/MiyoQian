@@ -382,7 +382,7 @@ class BbsTasks:
 
     def _pass_bbs_captcha(self, messages: list[str], scene: str, attempt: int, max_retries: int) -> str:
         provider = captcha.active_provider_label(self.config)
-        self._add(messages, f"{scene}触发验证码，正在调用{provider}识别({attempt}/{max_retries})")
+        self._add(messages, f"{scene}触发验证码，正在调用{provider}({attempt}/{max_retries})")
         create_data = self.client.get_json(c.BBS_CREATE_VERIFICATION_URL, headers=self._headers())
         if create_data.get("retcode") != 0:
             self._add(messages, f"{scene}验证码初始化失败: {create_data.get('message')}")

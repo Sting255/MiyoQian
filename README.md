@@ -119,11 +119,16 @@ uv run python main.py
 ```powershell
 $action   = New-ScheduledTaskAction -Execute 'wscript.exe' `
             -Argument ('//B //Nologo "' + (Resolve-Path .\scripts\start-miyoqian-hidden.vbs).Path + '"')
-$trigger  = New-ScheduledTaskTrigger -AtLogOn
+$atLogon  = New-ScheduledTaskTrigger -AtLogOn
+# 每 5 分钟再触发一次：看门狗万一死了能被拉回来。
+# 脚本自带幂等守卫（已在跑就直接退出；端口已被服务占用就只监视不重启），
+# 所以重复触发不会打断正在跑的签到。
+$every5m  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+            -RepetitionInterval (New-TimeSpan -Minutes 5)
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
             -DontStopOnIdleEnd -ExecutionTimeLimit ([TimeSpan]::Zero) `
             -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable
-Register-ScheduledTask -TaskName 'MiyoQianWebUI' -Action $action -Trigger $trigger -Settings $settings
+Register-ScheduledTask -TaskName 'MiyoQianWebUI' -Action $action -Trigger @($atLogon, $every5m) -Settings $settings
 ```
 
 之后用这两条启动 / 停止（启动不需要管理员权限）：
@@ -133,9 +138,10 @@ Start-ScheduledTask -TaskName MiyoQianWebUI
 Stop-ScheduledTask  -TaskName MiyoQianWebUI
 ```
 
-> ⚠️ 两个坑，照抄时注意：
+> ⚠️ 三个坑，照抄时注意：
 > 1. **动作别直接写 `powershell.exe`** —— 它会弹控制台窗口，`-WindowStyle Hidden` 也挡不住；所以这里走 `wscript.exe` + `.vbs`。
 > 2. **`-DontStopOnIdleEnd` 不能省** —— 默认设置会在"空闲结束"时停止任务，并**连带杀掉整个进程树**（服务凭空消失且日志无报错）。
+> 3. **重复触发必须配合幂等守卫** —— 任务的动作是 `wscript`，启动完就退出、任务算"已完成"，所以每 5 分钟都会再跑一次；如果启动脚本不做"已在跑就退出"的判断，就会每 5 分钟重启一次服务，**打断正在跑的签到**。本仓库的 `start-miyoqian.ps1` 已经带了这个守卫。
 
 **Linux / macOS**：用 `systemd --user` 或 `nohup` + cron 常驻即可，`scripts/start.sh` 会处理依赖。
 

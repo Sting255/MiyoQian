@@ -72,7 +72,7 @@ device:
 features:
   game_checkin: true           # 游戏社区签到（原神/星铁/绝区零等）
   cloud_game_checkin: false    # 云游戏签到（云原神/云绝区零，需要单独配 token）
-  bbs_tasks: true              # 米游币任务（看帖、点赞、分享）
+  bbs_tasks: false             # 米游币任务（看帖、点赞、分享）—— 容易触发验证码，建议先用一段时间再开
 
 # 验证码识别（可选；本地识别免费，需要在有 Chrome/Edge 的机器上运行）
 captcha:
@@ -105,8 +105,8 @@ ip_guard:
 # 注意：只在 `python main.py` 启动 Web 控制台常驻时生效
 # GitHub Actions 部署请改 .github/workflows/checkin.yml 里的 cron 表达式
 schedule:
-  enable: true
-  time: "09:00"             # 每天基准执行时间
+  enable: false             # 先在网页里手动跑通，再打开它
+  time: "09:00"             # 每天基准执行时间（记得带引号，不加引号 YAML 会当成 540）
   jitter_minutes: 30        # 随机波动（避免整点被风控）
   run_on_start: false       # Web 启动后立即执行一次
 
@@ -208,12 +208,13 @@ push:
     #   mail_to: ""
     #   smtp_ssl: true
 
-# === 米游币商品兑换（高级功能，默认先关掉） ===
+# === 米游币商品兑换（高级功能） ===
 # 到开卖那一刻会替你连着按「兑换」，抢到就停；一直没抢到就坚持到 retry_seconds 用完为止。
 # 网页「自动兑换」面板里也能改这两个数字，并且会实时估算大概发几次请求。
+# 示例里先关掉；想用的时候打开，或者在网页上开「自动兑换」。
 shop_exchange:
-  enable: false         # 只管"到点自动抢"；关着也能在商品卡片上手动点「立即兑换」
+  enable: false         # 只管"到点自动抢"；关着也能在商品卡片上手动点「兑换」
   retry_seconds: 20     # 到点后最多抢几秒（0 = 只发一次，不重试）
-  retry_interval: 0.4   # 每两次请求之间最多隔几秒（实际在 0~这个数之间随机，0 = 不等）
+  retry_interval: 0.4   # 每两次请求之间最多隔几秒（实际在 0~这个数之间随机；最小 0.05，填 0 会被纠正成 0.05）
   push: true            # 兑换结束后是否推送结果
   plans: []

@@ -624,7 +624,7 @@ def split_account_sections(lines: list[str]) -> list[dict[str, Any]]:
         if ACCOUNT_HEADER_PATTERN.match(line):
             if current_label or current_lines:
                 sections.append(_make_section(current_label, current_lines))
-            # 「# 账号 1/2: 大号」在推送里只保留账号名，序号留给用户也没用
+            # 「# 账号 1/2: main」在推送里只保留账号名，序号留给用户也没用
             current_label = re.split(r"[:：]", line.lstrip("#").strip(), 1)[-1].strip()
             current_lines = []
             continue

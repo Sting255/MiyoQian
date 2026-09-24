@@ -53,7 +53,7 @@ Web 控制台添加账号后，会在配置中保存账号名。扫码登录成�
 
 ```yaml
 accounts:
-  - name: 大号
+  - name: main
     tasks:
       features:
         game_checkin: true
@@ -65,7 +65,7 @@ accounts:
           - starrail
       bbs:
         checkin: true
-  - name: 小号
+  - name: alt
 ```
 
 没有 `tasks` 字段的账号，或 `tasks` 里没写的部分，都会自动沿用上面的全局配置。执行日志里出现「该账号使用独立任务配置」时，说明该账号正在使用自己的配置。

@@ -149,7 +149,25 @@ def command_serve(config_path: pathlib.Path, host: str | None, port: int | None)
     web = config.get("web", {})
     effective_host = host or str(web.get("host", "127.0.0.1"))
     effective_port = port or int(web.get("port", 5890))
-    serve(config_path, effective_host, effective_port)
+    try:
+        serve(config_path, effective_host, effective_port)
+    except OSError as exc:
+        # 控制台起不来必须让用户知道。以前只写日志，服务就静静地不跑，
+        # 用户可能过一天才发现 —— 2026-09-26 端口被系统保留区吞掉那次就是这样，
+        # 停了一整天。这里额外推一条通知（推送没配就只落日志）。
+        message = f"Web 控制台启动失败: {exc}"
+        print(f"[错误] {message}", file=sys.stderr)
+        try:
+            from .service.notifier import send_push
+
+            log_file = log_path(config_path, config)
+            configure_logger(log_file)
+            append_log(log_file, format_line(message, "startup"), component="startup")
+            send_push(config, "❌ 米游签控制台启动失败", message, success=False)
+        except Exception:
+            # 通知失败不能盖住真正的启动错误
+            pass
+        return 1
     return 0
 
 

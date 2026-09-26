@@ -16,7 +16,7 @@ import threading
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from urllib.parse import parse_qs, unquote, urlparse
 
 import qrcode
@@ -1452,13 +1452,46 @@ def serve(config_path: pathlib.Path, host: str, port: int) -> None:
         app.log("Web 控制台已停止", "startup")
 
 
+def _port_candidates(port: int) -> Iterator[int]:
+    """按优先级给出候选端口。
+
+    系统保留端口（Windows 开了 Hyper-V / WSL 时很常见）会让**连续一整块**端口都
+    无法监听，所以不能只按 +1 往后试：2026-09-26 就是这样，5890~5919 整段落在保留区里，
+    30 次尝试全部失败，控制台停了一整天。这里先按 1000 的步长往外跳，再退回逐个试。
+    """
+    yield port
+    for step in range(1, 21):
+        high = port + step * 1000
+        if high <= 65535:
+            yield high
+        low = port - step * 1000
+        if low >= 1024:
+            yield low
+    for delta in range(1, 30):
+        if port + delta <= 65535:
+            yield port + delta
+
+
 def create_server(host: str, port: int) -> tuple[ThreadingHTTPServer, int]:
     last_error: OSError | None = None
-    for candidate in range(port, port + 30):
+    tried: list[int] = []
+    for candidate in _port_candidates(port):
+        tried.append(candidate)
         try:
             return ThreadingHTTPServer((host, candidate), Handler), candidate
         except OSError as exc:
             last_error = exc
+            # 10013 = 端口被系统保留，10048 = 已被占用；其它错误直接抛
             if getattr(exc, "winerror", None) not in (10013, 10048):
                 raise
-    raise OSError(f"端口 {port}-{port + 29} 都无法监听: {last_error}")
+
+    hint = ""
+    if getattr(last_error, "winerror", None) == 10013:
+        hint = (
+            "。注意 10013 不是被别的程序占用，而是端口被系统保留 —— Windows 开启 "
+            "Hyper-V / WSL 后会保留成块的端口，而且每次重启保留的区间都可能变。"
+            "用 netsh int ipv4 show excludedportrange protocol=tcp 查看保留区间，"
+            "再把 config.yaml 的 web.port 换成一个不在保留区间内的端口"
+            "（选在动态端口范围之外的端口最稳妥）"
+        )
+    raise OSError(f"尝试了 {len(tried)} 个端口（{tried[0]} 起）都无法监听: {last_error}{hint}")

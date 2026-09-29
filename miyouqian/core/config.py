@@ -98,7 +98,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "on_error": "allow",
         "endpoints": [],
     },
-    "schedule": {"enable": False, "time": "09:00", "jitter_minutes": 45, "run_on_start": False},
+    "schedule": {
+        "enable": False,
+        "time": "09:00",
+        "jitter_minutes": 45,
+        "run_on_start": False,
+        # 补跑：服务启动时，如果今天的自动执行已经到点却还没跑完（电脑当时关着、
+        # 或者跑到一半被注销/重启打断），就立刻补一次。默认关闭，保持旧行为。
+        "catch_up": False,
+    },
     # 账号之间的防风控随机等待（分钟）。默认 60~120 分钟，与旧版本硬编码的
     # runner.ACCOUNT_GAP_RANGE = (3600, 7200) 一致。enable=false 或上下限都为 0
     # 就表示所有账号连着跑、不等待。
@@ -617,6 +625,7 @@ def normalize_schedule(config: dict[str, Any]) -> None:
         config["schedule"] = schedule
     schedule["enable"] = parse_bool(schedule.get("enable", True))
     schedule["run_on_start"] = parse_bool(schedule.get("run_on_start", False))
+    schedule["catch_up"] = parse_bool(schedule.get("catch_up", False))
     schedule["time"] = normalize_schedule_time(schedule.get("time"))
     schedule["jitter_minutes"] = clamp_minutes(schedule.get("jitter_minutes"), 45, 720)
 
@@ -835,6 +844,17 @@ def log_path(config_path: str | pathlib.Path, config: dict[str, Any]) -> pathlib
     storage = config.get("storage", {})
     log_dir = resolve_storage_path(config_path, str(storage.get("log_dir") or "logs"))
     return log_dir / str(storage.get("log_file") or "miyouqian.log")
+
+
+def run_state_path(config_path: str | pathlib.Path, config: dict[str, Any]) -> pathlib.Path:
+    """每日执行状态文件：记录今天跑没跑完、上次跑完是什么时候。
+
+    存在的意义是「重启不丢状态」：内存里的 last_run 一重启就没了，
+    网页上会显示成「上次执行：无」，看起来像从来没自动执行过。
+    """
+    storage = config.get("storage", {})
+    data_dir = resolve_storage_path(config_path, str(storage.get("data_dir") or "data"))
+    return data_dir / str(storage.get("run_state_file") or "run_state.json")
 
 
 def resolve_storage_path(config_path: str | pathlib.Path, value: str) -> pathlib.Path:

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import json
+import pathlib
 import random
 import threading
 from datetime import datetime, timedelta
@@ -14,7 +16,13 @@ RunFn = Callable[[threading.Event], list[str]]
 
 
 class DailyScheduler:
-    def __init__(self, config: dict[str, Any], run_fn: RunFn, log_fn: LogFn) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        run_fn: RunFn,
+        log_fn: LogFn,
+        state_path: pathlib.Path | None = None,
+    ) -> None:
         self.config = config
         self.run_fn = run_fn
         self.log = log_fn
@@ -26,7 +34,12 @@ class DailyScheduler:
         self._lock = threading.Lock()
         self._running = False
         self._next_run: datetime | None = None
-        self._last_run: datetime | None = None
+        # 执行状态落盘，重启后「上次执行」不再是空的（见 _load_state）
+        self._state_path = state_path
+        self._state: dict[str, Any] = self._load_state()
+        self._last_run: datetime | None = self._parse_state_time(
+            self._state.get("finished_at") or self._state.get("started_at")
+        )
         self._last_error = ""
         self._schedule_signature = self._make_schedule_signature(self._schedule_config())
         self._log_next_run_on_recompute = False
@@ -86,6 +99,12 @@ class DailyScheduler:
 
     def _loop(self) -> None:
         if self._schedule_config().get("run_on_start", False):
+            self.run_now()
+        elif self._should_catch_up():
+            # 今天已经到点却还没跑完：电脑当时关着，或者跑到一半被注销 / 重启打断
+            # （账号间隔要等 1~2 小时，这段窗口里注销一次就会丢掉后面的账号）。
+            # 这里补一次，并且只要当天没跑完，下次启动还会继续补 —— 直到跑完为止。
+            self.log("检测到今天的自动执行还没完成，服务启动时补跑一次")
             self.run_now()
         while not self._stop.is_set():
             try:
@@ -164,6 +183,8 @@ class DailyScheduler:
 
     def _run_once(self) -> None:
         self.log("开始执行签到任务")
+        self._state_started()
+        ok = False
         try:
             for line in self.run_fn(self._stop_run):
                 self.log(line)
@@ -171,8 +192,11 @@ class DailyScheduler:
                 self._last_run = datetime.now()
                 self._last_error = ""
             if self._stop_run.is_set():
+                # 用户主动停止：算「今天了结」，下次启动不再自动补跑
+                ok = True
                 self.log("签到任务已手动停止")
             else:
+                ok = True
                 self.log("签到任务执行完成")
         except Exception as exc:
             with self._lock:
@@ -182,6 +206,76 @@ class DailyScheduler:
             with self._lock:
                 self._running = False
             self._stop_run.clear()
+            self._state_finished(ok)
+
+    # ------------------------------------------------------------------
+    # 每日执行状态（落盘，重启不丢）
+    #
+    # 为什么需要：以前 last_run 只在内存里，服务一重启就变空，网页上显示成
+    # 「上次执行：无」，看起来像从来没自动跑过；而真正被打断的那次（比如账号
+    # 间隔等待期间注销了 Windows）也没人知道还差哪个账号没跑。
+    # ------------------------------------------------------------------
+
+    def _load_state(self) -> dict[str, Any]:
+        path = self._state_path
+        if not path:
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _save_state(self, **changes: Any) -> None:
+        """更新并落盘执行状态。写失败只记一条日志，绝不影响签到本身。"""
+        if not self._state_path:
+            return
+        state = dict(self._state)
+        state.update(changes)
+        self._state = state
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._state_path.write_text(
+                json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+        except OSError as exc:
+            try:
+                self.log(f"写入执行状态失败（不影响签到）: {exc}")
+            except Exception:
+                pass
+
+    @staticmethod
+    def _parse_state_time(value: Any) -> datetime | None:
+        try:
+            return datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return None
+
+    def _state_started(self) -> None:
+        now = datetime.now()
+        self._save_state(date=now.date().isoformat(), started_at=now.isoformat(timespec="seconds"), finished=False)
+
+    def _state_finished(self, ok: bool) -> None:
+        changes: dict[str, Any] = {"finished": bool(ok)}
+        if ok:
+            changes["finished_at"] = datetime.now().isoformat(timespec="seconds")
+        self._save_state(**changes)
+
+    def _should_catch_up(self) -> bool:
+        """启动时判断要不要补跑今天这次。"""
+        schedule = self._schedule_config()
+        if not schedule.get("enable", True) or not schedule.get("catch_up", False):
+            return False
+        today = datetime.now().date().isoformat()
+        if self._state.get("date") == today and self._state.get("finished"):
+            return False  # 今天已经完整跑完
+        try:
+            hour, minute = parse_time(str(schedule.get("time", "09:00")))
+        except ValueError:
+            return False
+        now = datetime.now()
+        due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return now >= due
 
     def _schedule_config(self) -> dict[str, Any]:
         schedule = self.config.get("schedule", {})

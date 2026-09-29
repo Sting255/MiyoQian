@@ -24,7 +24,7 @@ import qrcode
 from ..auth.login import AigisRequired, CaptchaLogin, QRLogin, _QrRefreshed
 from ..core import captcha as captcha_mod
 from ..core import cookies, crypto
-from ..core.config import load_config, log_path, normalize_config, save_config, validate_unique_account_uids
+from ..core.config import load_config, log_path, normalize_config, run_state_path, save_config, validate_unique_account_uids
 from ..core.http import ApiClient, shop_client
 from ..core.geetest.browser import cleanup_stale_profiles
 from ..core.geetest.nine import self_check as captcha_self_check
@@ -104,7 +104,12 @@ class WebApp:
         self._qr_refresh = threading.Event()
         self._login_cancel = threading.Event()
         self._login_generation = 0
-        self.scheduler = DailyScheduler(self.config, self.run_all, lambda message: self.log(message, "scheduler"))
+        self.scheduler = DailyScheduler(
+            self.config,
+            self.run_all,
+            lambda message: self.log(message, "scheduler"),
+            state_path=run_state_path(config_path, self.config),
+        )
         self.exchange_scheduler = ExchangeScheduler(
             self.config,
             self.run_shop_exchange_plan,

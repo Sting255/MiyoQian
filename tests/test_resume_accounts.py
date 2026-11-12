@@ -13,6 +13,7 @@ import pathlib
 import tempfile
 import threading
 import time
+import time
 import unittest
 from datetime import datetime, timedelta
 from unittest import mock
@@ -317,9 +318,14 @@ class ResumeRunnerTest(IsolatedConfigTest):
         )
         self.assertEqual(attempted, [])
         self.assertEqual(done, [])
-        self.assertEqual(failed, ["2|小号"], "被 IP 门禁挡下的账号也算没签成")
         self.assertNotIn("# 今天所有账号均已完成，无需补跑", lines)
         self.assertTrue(any("出口 IP 未恢复" in line for line in lines), lines)
+
+    def test_ip_gate_does_not_consume_the_attempt_budget(self) -> None:
+        # 没建 ApiClient、没登录没验证码，不该记失败次数（否则代理自启会白吃两次预算）
+        failed: list[str] = []
+        self._run({"大号": [], "小号": []}, ip_results=[False, False], failed=failed)
+        self.assertEqual(failed, [], "IP 挡下不能记成「尝试过」")
 
     def test_manual_run_reports_done_in_order(self) -> None:
         _, _, _, done = self._run({"A": [], "B": []}, gap_minutes=0)
@@ -390,6 +396,77 @@ class UnfinishedRunTest(unittest.TestCase):
         self.assertFalse(
             self.make_scheduler(config)._should_catch_up(), "试满 2 次后不该再因为它触发补跑"
         )
+
+    def test_bad_attempt_value_is_treated_as_exhausted(self) -> None:
+        # 状态文件被手改坏成字符串：当「已试满」，绝不能抛异常把调度线程弄死
+        now = datetime.now()
+        base = (now - timedelta(minutes=1)).strftime("%H:%M")
+        today = now.date().isoformat()
+        self.state_path.write_text(
+            json.dumps({"date": today, "finished": False, "accounts_attempts": {"1|大号": "x"}}),
+            encoding="utf-8",
+        )
+        scheduler = self.make_scheduler(make_config(time=base, accounts=["大号"]))
+        self.assertFalse(scheduler._should_catch_up(), "坏值不该被当成「还没试过」而反复补跑")
+        self.assertEqual(scheduler._attempts_of({"1|大号": "x"}, "1|大号"), 2)
+
+    def test_scheduler_thread_survives_a_broken_state_file(self) -> None:
+        now = datetime.now()
+        base = (now - timedelta(minutes=1)).strftime("%H:%M")
+        self.state_path.write_text(
+            json.dumps({"date": now.date().isoformat(), "finished": False, "accounts_attempts": {"1|A": ["坏"]}}),
+            encoding="utf-8",
+        )
+        scheduler = self.make_scheduler(make_config(time=base, accounts=["A"]))
+        scheduler.start()
+        self.addCleanup(scheduler.stop)
+        time.sleep(0.3)
+        self.assertTrue(scheduler._thread and scheduler._thread.is_alive(), "调度线程被坏状态弄死了")
+        self.assertEqual(scheduler.status()["last_error"], "")
+
+    def test_bad_attempt_value_does_not_break_marking(self) -> None:
+        now = datetime.now()
+        today = now.date().isoformat()
+        self.state_path.write_text(
+            json.dumps({"date": today, "finished": False, "accounts_attempts": {"1|A": "x"}}),
+            encoding="utf-8",
+        )
+        scheduler = self.make_scheduler(make_config(accounts=["A"]))
+        scheduler.mark_account_failed("1|A")
+        self.assertEqual(self.read_state()["accounts_attempts"], {"1|A": 3})
+
+    def test_mixed_budget_still_catches_up_for_the_untried_account(self) -> None:
+        now = datetime.now()
+        base = (now - timedelta(minutes=1)).strftime("%H:%M")
+        today = now.date().isoformat()
+        self.state_path.write_text(
+            json.dumps({"date": today, "finished": False, "accounts_done": [], "accounts_attempts": {"1|A": 2}}),
+            encoding="utf-8",
+        )
+        scheduler = self.make_scheduler(make_config(time=base, accounts=["A", "B"]))
+        self.assertTrue(scheduler._should_catch_up(), "B 一次都没试过，不能因为 A 试满就不补")
+
+    def test_failed_run_refreshes_last_run_from_started_at(self) -> None:
+        # 上一轮没跑成（没写 finished_at）：界面的「上次执行」要跟着走，不能停在旧日子
+        self.state_path.write_text(
+            json.dumps(
+                {
+                    "date": "2026-11-10",
+                    "started_at": "2026-11-10T08:00:00",
+                    "finished_at": "2026-11-10T08:30:00",
+                    "finished": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        scheduler = self.make_scheduler(make_config(accounts=["A"]))
+        self.assertEqual(scheduler.status()["last_run"], "2026-11-10T08:30:00")
+        self.state_path.write_text(
+            json.dumps({"date": "2026-11-12", "started_at": "2026-11-12T08:00:00", "finished": False}),
+            encoding="utf-8",
+        )
+        fresh = self.make_scheduler(make_config(accounts=["A"]))
+        self.assertEqual(fresh.status()["last_run"], "2026-11-12T08:00:00")
 
     def test_all_accounts_done_only_sweeps(self) -> None:
         # 账号都跑完但没来得及写 finished（被杀在最后一步）：补跑只是空转一遍收尾

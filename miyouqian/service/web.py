@@ -7,6 +7,7 @@ import base64
 import copy
 import hashlib
 import io
+import ipaddress
 import json
 import mimetypes
 import os
@@ -51,6 +52,17 @@ WEB_ROOT = pathlib.Path(__file__).resolve().parents[1] / "webui"
 # 写进 runtime.json 与 /api/ping 的自我标识：用来确认端口上跑的是本应用，
 # 而不是碰巧占了同一个端口的别的程序。
 APP_ID = "miyouqian"
+
+
+def _is_loopback(client: Any) -> bool:
+    """是不是本机来源。用 ipaddress 而不是字符串白名单：IPv6 连接可能显示成
+    `::ffff:127.0.0.1`，按字符串比会漏掉，导致单实例检查判无实例、双开。"""
+    try:
+        # ipv4_mapped 只有 IPv6Address 才有，IPv4 来源要 getattr 兜一下
+        addr = ipaddress.ip_address(str(client or "").split("%", 1)[0])
+        return (getattr(addr, "ipv4_mapped", None) or addr).is_loopback
+    except ValueError:
+        return False
 
 # 「测试推送」用的示例日志：让用户在真正跑任务前就能看到推送长什么样
 TEST_PUSH_SAMPLE = """# 账号 1/1: 示例账号
@@ -140,7 +152,7 @@ class WebApp:
         只有回环来源才回 pid / started_at；外网模式下匿名请求只该知道是不是本应用。
         """
         info: dict[str, Any] = {"app": APP_ID, "port": self.bound_port}
-        if str(client) in ("127.0.0.1", "::1", "localhost"):
+        if _is_loopback(client):
             info["pid"] = os.getpid()
             info["started_at"] = self.started_at
         return info

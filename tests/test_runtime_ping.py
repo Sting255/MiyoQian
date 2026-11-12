@@ -12,6 +12,9 @@ import contextlib
 import io
 import json
 import os
+import pathlib
+import subprocess
+import sys
 import threading
 import unittest
 import urllib.error
@@ -29,7 +32,7 @@ from miyouqian.service.web import (
     remove_runtime_file,
     write_runtime_file,
 )
-from tests.support import IsolatedConfigTest, base_config
+from tests.support import ROOT, IsolatedConfigTest, base_config
 
 
 class RuntimeFileTest(IsolatedConfigTest):
@@ -116,6 +119,12 @@ class PingEndpointTest(IsolatedConfigTest):
         self.assertEqual(set(body), {"app", "port"})
         self.assertEqual(self.app.ping("127.0.0.1")["pid"], os.getpid())
         self.assertEqual(self.app.ping("::1")["pid"], os.getpid())
+
+    def test_ipv4_mapped_loopback_counts_as_local(self) -> None:
+        # 双栈监听时来源会显示成 ::ffff:127.0.0.1，字符串白名单会漏掉 -> 单实例检查失效
+        self.assertEqual(self.app.ping("::ffff:127.0.0.1")["pid"], os.getpid())
+        self.assertEqual(self.app.ping("::ffff:192.168.1.9"), {"app": APP_ID, "port": self.port})
+        self.assertNotIn("pid", self.app.ping("fe80::1%eth0"))
 
     def test_other_api_still_requires_login(self) -> None:
         status, _ = self._get("/api/status")
@@ -263,7 +272,7 @@ class CommandServeTest(IsolatedConfigTest):
     def _run(self, mutex, found):
         out = io.StringIO()
         with (
-            mock.patch.object(cli, "_acquire_single_instance", lambda: mutex),
+            mock.patch.object(cli, "_acquire_single_instance", lambda *_a, **_k: mutex),
             mock.patch("miyouqian.service.web.find_running_instance", return_value=found),
             mock.patch("miyouqian.service.web.serve") as serve_mock,
             contextlib.redirect_stdout(out),
@@ -289,6 +298,53 @@ class CommandServeTest(IsolatedConfigTest):
         code, _output, serve_mock = self._run(object(), None)
         self.assertEqual(code, 0)
         serve_mock.assert_called_once()
+
+
+class SingleInstanceLockTest(IsolatedConfigTest):
+    def test_second_lock_from_the_same_config_is_refused(self) -> None:
+        self.write_config(base_config())
+        first = cli._acquire_single_instance(self.config_path)
+        second = cli._acquire_single_instance(self.config_path)
+        try:
+            self.assertIsNotNone(first, "第一次取锁不该失败")
+            self.assertIsNone(second, "同一份配置的第二把锁必须被拒")
+        finally:
+            self._release(first)
+
+    def test_other_config_is_not_blocked_by_this_one(self) -> None:
+        # 另一份 config/data 起第二份副本是合法用法：锁名必须跟着配置路径走。
+        # 跨进程验证（同进程里两个不同名字的互斥体本来就不冲突，测不出问题）。
+        self.write_config(base_config())
+        other = self.dir / "other.yaml"
+        other.write_text(self.config_path.read_text(encoding="utf-8"), encoding="utf-8")
+        held = cli._acquire_single_instance(self.config_path)
+        self.assertIsNotNone(held)
+        self.addCleanup(self._release, held)
+
+        def probe(path: pathlib.Path) -> str:
+            code = (
+                "import sys; from miyouqian.cli import _acquire_single_instance;"
+                "print('free' if _acquire_single_instance(sys.argv[1]) is not None else 'busy')"
+            )
+            done = subprocess.run(
+                [sys.executable, "-c", code, str(path)],
+                capture_output=True,
+                text=True,
+                cwd=str(ROOT),
+                timeout=120,
+            )
+            return done.stdout.strip()
+
+        self.assertEqual(probe(self.config_path), "busy", "同一份配置必须被挡住")
+        self.assertEqual(probe(other), "free", "另一份配置不该被误挡")
+
+    @staticmethod
+    def _release(handle: object) -> None:
+        if not handle:
+            return
+        import ctypes
+
+        ctypes.WinDLL("kernel32").CloseHandle(ctypes.c_void_p(handle))
 
 
 if __name__ == "__main__":

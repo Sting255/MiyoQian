@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import pathlib
 import sys
 
@@ -142,16 +143,20 @@ def command_run(
     return 0 if success else 1
 
 
-def _acquire_single_instance(name: str = r"Local\miyouqian-serve") -> object:
+def _acquire_single_instance(config_path: pathlib.Path) -> object:
     """取进程级单实例锁。拿到返回句柄，已被占用返回 None。
 
     用命名互斥体而不是文件：进程退出（含被强杀）由系统自动释放，不存在
-    「残留文件判定存活」那类问题。拿不到就照常启动——锁本身出问题不能
-    变成「服务起不来」的理由。
+    「残留文件判定存活」那类问题。名字带配置路径的短哈希：同一台机器上拿
+    另一份 config/data 起第二份副本是合法用法，不该被误挡。
+    拿不到就照常启动——锁本身出问题不能变成「服务起不来」的理由。
     """
     if sys.platform != "win32":
         return True
     import ctypes
+
+    digest = hashlib.sha256(str(pathlib.Path(config_path).resolve()).lower().encode("utf-8")).hexdigest()[:12]
+    name = rf"Local\miyouqian-serve-{digest}"
 
     try:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -171,7 +176,7 @@ def _acquire_single_instance(name: str = r"Local\miyouqian-serve") -> object:
 def command_serve(config_path: pathlib.Path, host: str | None, port: int | None) -> int:
     from .service.web import find_running_instance, serve
 
-    if _acquire_single_instance() is None:
+    if _acquire_single_instance(config_path) is None:
         # 互斥体抢不到：另一个进程正在起控制台（可能它还没写 runtime.json）
         print("已有实例正在运行（单实例锁被占用），本次不再启动")
         return 0

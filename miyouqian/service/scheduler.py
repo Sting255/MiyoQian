@@ -43,8 +43,10 @@ class DailyScheduler:
         # 执行状态落盘，重启后「上次执行」不再是空的（见 _load_state）
         self._state_path = state_path
         self._state: dict[str, Any] = self._load_state()
-        self._last_run: datetime | None = self._parse_state_time(
-            self._state.get("finished_at") or self._state.get("started_at")
+        # 没跑成的那轮不写 finished_at，若只认 finished_at，界面会一直停在最后一次全成功的日子
+        self._last_run = max(
+            (t for t in (self._parse_state_time(self._state.get(name)) for name in ("started_at", "finished_at")) if t),
+            default=None,
         )
         self._last_error = ""
         # 本次执行是否「启动补跑」，以及补跑要跳过的账号（在 run_now 里按当时的状态文件快照）
@@ -122,7 +124,7 @@ class DailyScheduler:
         if not key or self._state.get("date") != datetime.now().date().isoformat():
             return
         attempts = dict(self._state.get("accounts_attempts") or {})
-        attempts[key] = int(attempts.get(key) or 0) + 1
+        attempts[key] = self._attempts_of(attempts, key) + 1
         self._unfinished_this_run.add(key)
         self._save_state(accounts_attempts=attempts)
 
@@ -147,14 +149,21 @@ class DailyScheduler:
             }
 
     def _loop(self) -> None:
-        if self._schedule_config().get("run_on_start", False):
-            self.run_now()
-        elif self._should_catch_up():
-            # 今天已经到点却还没跑完：电脑当时关着，或者跑到一半被注销 / 重启打断
-            # （账号间隔要等 1~2 小时，这段窗口里注销一次就会丢掉后面的账号）。
-            # 这里补一次，并且只要当天没跑完，下次启动还会继续补 —— 直到跑完为止。
-            self.log("检测到今天的自动执行还没完成，服务启动时补跑一次")
-            self.run_now(resume=True)
+        try:
+            if self._schedule_config().get("run_on_start", False):
+                self.run_now()
+            elif self._should_catch_up():
+                # 今天已经到点却还没跑完：电脑当时关着，或者跑到一半被注销 / 重启打断
+                # （账号间隔要等 1~2 小时，这段窗口里注销一次就会丢掉后面的账号）。
+                # 这里补一次，并且只要当天没跑完，下次启动还会继续补 —— 直到跑完为止。
+                self.log("检测到今天的自动执行还没完成，服务启动时补跑一次")
+                self.run_now(resume=True)
+        except Exception as exc:
+            # 状态文件被改坏之类的意外绝不能让调度线程死掉：线程一死自动签到
+            # 就永远不再触发，而网页上还显示着「已启用」。
+            with self._lock:
+                self._last_error = f"启动补跑判断失败: {exc}"
+            self.log(f"启动补跑判断失败，本次不补跑: {exc}")
         while not self._stop.is_set():
             try:
                 self._loop_once()
@@ -356,7 +365,17 @@ class DailyScheduler:
             for index, account in enumerate(self.config.get("accounts") or [], start=1)
         ]
         remaining = [key for key in remaining if key not in done]
-        return bool(remaining) and all(int(attempts.get(key) or 0) >= MAX_ACCOUNT_ATTEMPTS for key in remaining)
+        return bool(remaining) and all(
+            self._attempts_of(attempts, key) >= MAX_ACCOUNT_ATTEMPTS for key in remaining
+        )
+
+    @staticmethod
+    def _attempts_of(attempts: dict[str, Any], key: str) -> int:
+        """读出某个键的尝试次数。坏值当「已试满」：状态文件被手改坏不能把调度线程弄死。"""
+        try:
+            return int(attempts.get(key) or 0)
+        except (TypeError, ValueError):
+            return MAX_ACCOUNT_ATTEMPTS
 
     def _schedule_config(self) -> dict[str, Any]:
         schedule = self.config.get("schedule", {})

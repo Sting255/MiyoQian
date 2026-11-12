@@ -109,15 +109,22 @@ function Test-ServiceUp {
             }
         }
     }
-    # 3. No usable runtime file (deleted, data dir moved, the write failed): Windows
-    #    does not put the working directory into the command line, so match on
-    #    "main.py" plus either the uv launcher or the project dir when it is there.
-    #    Trade-off: a foreign `uv run python main.py` would also look healthy.
-    $procs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    # 3. No usable runtime file (deleted, data dir moved, the write failed): match a
+    #    main.py process that belongs to this project. Windows does not put the
+    #    working directory into the command line, so also accept a parent whose
+    #    command line carries the project dir (uv.exe -> python.exe -> venv python).
+    #    Without that check any foreign `uv run python main.py` would look healthy
+    #    and keep our console offline.
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $byId = @{}
+    foreach ($item in $all) { $byId[[int]$item.ProcessId] = $item }
+    $procs = @($all | Where-Object {
         $_.Name -match '^(python|pythonw|uv)\.exe$' -and
         $_.CommandLine -and
         $_.CommandLine -match 'main\.py' -and
-        ($_.Name -eq 'uv.exe' -or $_.CommandLine -match [regex]::Escape($projectDir))
+        ($_.CommandLine -match [regex]::Escape($projectDir) -or
+            ($byId[[int]$_.ParentProcessId] -and
+             $byId[[int]$_.ParentProcessId].CommandLine -match [regex]::Escape($projectDir)))
     })
     return ($procs.Count -gt 0)
 }

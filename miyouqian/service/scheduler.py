@@ -41,6 +41,9 @@ class DailyScheduler:
             self._state.get("finished_at") or self._state.get("started_at")
         )
         self._last_error = ""
+        # 本次执行是否「启动补跑」，以及补跑要跳过的账号（在 run_now 里按当时的状态文件快照）
+        self._resume = False
+        self._resume_skip: set[str] = set()
         self._schedule_signature = self._make_schedule_signature(self._schedule_config())
         self._log_next_run_on_recompute = False
 
@@ -68,14 +71,36 @@ class DailyScheduler:
                 self._log_next_run_on_recompute = new_signature[1] != old_signature[1]
         self._wake.set()
 
-    def run_now(self) -> bool:
+    def run_now(self, resume: bool = False) -> bool:
         with self._lock:
             if self._running:
                 return False
             self._running = True
+            # resume=True：服务启动补跑，跳过今天已落盘的账号；
+            # resume=False：手动「立即执行」按整轮跑，不跳过任何账号。
+            today = datetime.now().date().isoformat()
+            done = self._state.get("accounts_done") if self._state.get("date") == today else None
+            self._resume = bool(resume)
+            self._resume_skip = {str(name) for name in done or [] if name} if resume else set()
             self._stop_run.clear()
         threading.Thread(target=self._run_once, name="miyouqian-manual-run", daemon=True).start()
         return True
+
+    def resume_skip_accounts(self) -> set[str]:
+        """本次执行要跳过的账号（只有补跑时才非空）。"""
+        with self._lock:
+            return set(self._resume_skip) if self._resume else set()
+
+    def mark_account_done(self, name: str) -> None:
+        """记下一个账号已完成。只累加今天的进度，写盘失败不影响签到。"""
+        name = str(name or "").strip()
+        if not name or self._state.get("date") != datetime.now().date().isoformat():
+            return
+        done = list(self._state.get("accounts_done") or [])
+        if name in done:
+            return
+        done.append(name)
+        self._save_state(accounts_done=done)
 
     def stop_run(self) -> bool:
         """请求中断正在执行的任务。返回 False 表示当前没有任务在跑。"""
@@ -105,7 +130,7 @@ class DailyScheduler:
             # （账号间隔要等 1~2 小时，这段窗口里注销一次就会丢掉后面的账号）。
             # 这里补一次，并且只要当天没跑完，下次启动还会继续补 —— 直到跑完为止。
             self.log("检测到今天的自动执行还没完成，服务启动时补跑一次")
-            self.run_now()
+            self.run_now(resume=True)
         while not self._stop.is_set():
             try:
                 self._loop_once()
@@ -205,6 +230,9 @@ class DailyScheduler:
         finally:
             with self._lock:
                 self._running = False
+                # 补跑标记只属于本次执行：留着会让隔天的正常调度误跳过账号
+                self._resume = False
+                self._resume_skip = set()
             self._stop_run.clear()
             self._state_finished(ok)
 
@@ -253,7 +281,15 @@ class DailyScheduler:
 
     def _state_started(self) -> None:
         now = datetime.now()
-        self._save_state(date=now.date().isoformat(), started_at=now.isoformat(timespec="seconds"), finished=False)
+        today = now.date().isoformat()
+        # 新的一天从零开始；补跑时保留已有进度，否则第二次被打断又得从第一个账号重来
+        done = list(self._resume_skip) if self._state.get("date") == today else []
+        self._save_state(
+            date=today,
+            started_at=now.isoformat(timespec="seconds"),
+            finished=False,
+            accounts_done=done,
+        )
 
     def _state_finished(self, ok: bool) -> None:
         changes: dict[str, Any] = {"finished": bool(ok)}

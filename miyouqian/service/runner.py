@@ -80,8 +80,13 @@ def run_tasks(
     emit: EmitFn | None = None,
     emit_component: ComponentEmitFn | None = None,
     stop_event: threading.Event | None = None,
+    skip_accounts: set[str] | None = None,
+    on_account_done: Callable[[str], None] | None = None,
 ) -> list[str]:
     """跑一轮签到任务。
+
+    `skip_accounts` 里的账号今天已经跑过（断点续跑），直接跳过；
+    `on_account_done` 在每个账号处理完后回调一次，供调用方落盘进度。
 
     结束后（无论成功、报错还是被中断）都会释放常驻的视觉识别模型，
     把约 139MB 内存还给系统；下次遇到验证码时会自动重新加载（约 0.5 秒）。
@@ -97,6 +102,8 @@ def run_tasks(
             emit,
             emit_component,
             stop_event,
+            skip_accounts,
+            on_account_done,
         )
     finally:
         captcha.release_matcher()
@@ -112,6 +119,8 @@ def _run_tasks(
     emit: EmitFn | None = None,
     emit_component: ComponentEmitFn | None = None,
     stop_event: threading.Event | None = None,
+    skip_accounts: set[str] | None = None,
+    on_account_done: Callable[[str], None] | None = None,
 ) -> list[str]:
     output: list[str] = []
 
@@ -137,13 +146,20 @@ def _run_tasks(
     should_emit = bool(emit or emit_component)
     account_push = bool((config.get("push") or {}).get("per_account", False))
     try:
+        executed = 0
         for index, account in enumerate(accounts, start=1):
             if stopped():
                 add("# ⏹ 已停止，剩余账号不再执行")
                 break
+            name = str(account.get("name") or "未命名")
+            if skip_accounts and name in skip_accounts:
+                add(f"# 账号 {name} 今天已完成，跳过（断点续跑）")
+                continue
             # 账号间加随机间隔，降低多账号被风控的概率；等待期间可以随时停止。
             # 具体等多久由配置段 account_gap 决定（网页「每日调度」里可改，0 = 不等）。
-            if index > 1:
+            # 只在实际要执行的账号之间等：第一个真正执行的账号不等，补跑时才不会白等。
+            executed += 1
+            if executed > 1:
                 account_gap = account_gap_seconds(config)
                 if account_gap <= 0:
                     add("# 账号间隔设为 0，直接跑下一个账号")
@@ -162,9 +178,9 @@ def _run_tasks(
                 if stopped():
                     add("# ⏹ 已停止，剩余账号不再执行")
                     break
-                add(f"# 跳过账号 {account.get('name', '未命名')}：出口 IP 未恢复")
+                add(f"# 跳过账号 {name}：出口 IP 未恢复")
                 continue
-            add(f"# 账号 {index}/{len(accounts)}: {account.get('name', '未命名')}")
+            add(f"# 账号 {index}/{len(accounts)}: {name}")
             start = len(output)
             try:
                 # 账号可以拥有独立的任务配置，未单独配置时跟随全局配置。
@@ -203,12 +219,17 @@ def _run_tasks(
             except Exception as exc:
                 # 单个账号的接口/网络异常（超时、5xx、429…）不能吃掉当天剩下的账号；
                 # 记成失败让推送说实话，然后继续跑下一个账号。
-                add(f"{ACCOUNT_CRASH_MARKER}（{account.get('name', '未命名')}）：{exc}")
+                add(f"{ACCOUNT_CRASH_MARKER}（{name}）：{exc}")
             if account_push:
                 _push_account_result(config, add, account, output[start:])
+            # 异常也算「已处理」：坏账号若不计入进度，补跑会一直卡在它身上重试。
+            if on_account_done:
+                on_account_done(name)
             if stopped():
                 add("# ⏹ 已停止，剩余账号不再执行")
                 break
+        if skip_accounts and not executed:
+            add("# 今天所有账号均已完成，无需补跑")
     finally:
         # 必须落盘：login 刷新出来的 cookie_token 存在内存配置里，
         # 异常路径跳过这一步就等于把刚续上的登录态丢了。

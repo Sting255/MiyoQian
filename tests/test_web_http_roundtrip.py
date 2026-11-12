@@ -35,7 +35,7 @@ class HttpRoundTripTest(IsolatedConfigTest):
         self.config["accounts"] = [
             {
                 "name": "A",
-                "stuid": "104335735",
+                "stuid": "100000001",
                 "cookie": COOKIE,
                 "stoken": STOKEN,
                 "mid": MID,
@@ -97,7 +97,7 @@ class HttpRoundTripTest(IsolatedConfigTest):
         self.assertEqual(fetched["push"]["channels"][0]["token"], MASKED_SECRET)
         self.assertEqual(fetched["captcha"]["channels"][0]["userkey"], MASKED_SECRET)
         # 界面要用的非敏感信息必须保留
-        self.assertEqual(fetched["accounts"][0]["stuid"], "104335735")
+        self.assertEqual(fetched["accounts"][0]["stuid"], "100000001")
         self.assertEqual(fetched["accounts"][0]["name"], "A")
 
         # 2) 浏览器把拿到的配置改一处再整体发回来

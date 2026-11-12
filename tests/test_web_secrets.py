@@ -33,7 +33,7 @@ class ConfigSecretsTest(IsolatedConfigTest):
         config["accounts"] = [
             {
                 "name": "A",
-                "stuid": "104335735",
+                "stuid": "100000001",
                 "cookie": SECRET_COOKIE,
                 "stoken": SECRET_STOKEN,
                 "mid": SECRET_MID,
@@ -61,7 +61,7 @@ class ConfigSecretsTest(IsolatedConfigTest):
     def test_uid_is_still_visible_to_the_ui(self) -> None:
         """stuid 是界面要显示的账号标识，不能一起掩掉。"""
         app = self._app()
-        self.assertEqual(app.get_config()["accounts"][0]["stuid"], "104335735")
+        self.assertEqual(app.get_config()["accounts"][0]["stuid"], "100000001")
 
     def test_masked_account_still_looks_logged_in(self) -> None:
         """前端用 account.cookie 的真值性判断账号是否已登录。"""

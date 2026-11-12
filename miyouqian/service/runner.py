@@ -152,8 +152,19 @@ def _run_tasks(
                 add("# ⏹ 已停止，剩余账号不再执行")
                 break
             name = str(account.get("name") or "未命名")
-            if skip_accounts and name in skip_accounts:
+            # 进度键带上配置序号：账号名会被截断成 10 个字符，同名账号不能互相顶掉。
+            # 键对不上只会重跑，绝不会误跳过（旧格式的纯名字进度一律不匹配）。
+            key = f"{index}|{name}"
+            if skip_accounts and key in skip_accounts:
                 add(f"# 账号 {name} 今天已完成，跳过（断点续跑）")
+                continue
+            # 出口 IP 守卫：VPN / 代理把流量引到境外时暂停签到，避免异地登录触发风控。
+            # 放在计数前面：被 IP 门禁挡下的账号没真执行，不该占「执行名额」和白等间隔。
+            if not ensure_mainland_ip(config, add, stop_event=stop_event):
+                if stopped():
+                    add("# ⏹ 已停止，剩余账号不再执行")
+                    break
+                add(f"# 跳过账号 {name}：出口 IP 未恢复")
                 continue
             # 账号间加随机间隔，降低多账号被风控的概率；等待期间可以随时停止。
             # 具体等多久由配置段 account_gap 决定（网页「每日调度」里可改，0 = 不等）。
@@ -173,15 +184,9 @@ def _run_tasks(
                     if not interruptible_sleep(account_gap, stop_event):
                         add("# ⏹ 等待已被手动停止，剩余账号不再执行")
                         break
-            # 出口 IP 守卫：VPN / 代理把流量引到境外时暂停签到，避免异地登录触发风控
-            if not ensure_mainland_ip(config, add, stop_event=stop_event):
-                if stopped():
-                    add("# ⏹ 已停止，剩余账号不再执行")
-                    break
-                add(f"# 跳过账号 {name}：出口 IP 未恢复")
-                continue
             add(f"# 账号 {index}/{len(accounts)}: {name}")
             start = len(output)
+            crashed = False
             try:
                 # 账号可以拥有独立的任务配置，未单独配置时跟随全局配置。
                 account_tasks = account_config(config, account)
@@ -219,16 +224,17 @@ def _run_tasks(
             except Exception as exc:
                 # 单个账号的接口/网络异常（超时、5xx、429…）不能吃掉当天剩下的账号；
                 # 记成失败让推送说实话，然后继续跑下一个账号。
+                crashed = True
                 add(f"{ACCOUNT_CRASH_MARKER}（{name}）：{exc}")
             if account_push:
                 _push_account_result(config, add, account, output[start:])
-            # 异常也算「已处理」：坏账号若不计入进度，补跑会一直卡在它身上重试。
-            if on_account_done:
-                on_account_done(name)
+            # 崩掉的账号不算完成：留给下次启动补跑再试一次，别把失败记成「今天已跑」。
+            if on_account_done and not crashed:
+                on_account_done(key)
             if stopped():
                 add("# ⏹ 已停止，剩余账号不再执行")
                 break
-        if skip_accounts and not executed:
+        if skip_accounts and not executed and not stopped():
             add("# 今天所有账号均已完成，无需补跑")
     finally:
         # 必须落盘：login 刷新出来的 cookie_token 存在内存配置里，

@@ -82,9 +82,9 @@ class ResumeStateTest(unittest.TestCase):
     def test_mark_account_done_is_persisted(self) -> None:
         scheduler = self.make_scheduler()
         scheduler._state_started()
-        scheduler.mark_account_done("大号")
-        scheduler.mark_account_done("大号")  # 重复标记不能写两遍
-        self.assertEqual(self.read_state()["accounts_done"], ["大号"])
+        scheduler.mark_account_done("1|大号")
+        scheduler.mark_account_done("1|大号")  # 重复标记不能写两遍
+        self.assertEqual(self.read_state()["accounts_done"], ["1|大号"])
 
     def test_mark_account_done_ignores_empty_name(self) -> None:
         scheduler = self.make_scheduler()
@@ -112,10 +112,10 @@ class ResumeStateTest(unittest.TestCase):
 
     def test_resume_run_skips_accounts_done_today(self) -> None:
         today = datetime.now().date().isoformat()
-        self.write_state(date=today, finished=False, accounts_done=["大号"])
+        self.write_state(date=today, finished=False, accounts_done=["1|大号"])
         scheduler = self.make_scheduler()
         scheduler.run_now(resume=True)
-        self.assertEqual(scheduler.resume_skip_accounts(), {"大号"})
+        self.assertEqual(scheduler.resume_skip_accounts(), {"1|大号"})
         self.drain(scheduler)
 
     def test_manual_run_does_not_skip_anything(self) -> None:
@@ -169,17 +169,21 @@ class ResumeRunnerTest(IsolatedConfigTest):
         self,
         behaviours: dict[str, object],
         *,
+        names: list[str] | None = None,
         skip: set[str] | None = None,
         gap_minutes: int = 20,
+        ip_results: list[bool] | None = None,
     ) -> tuple[list[str], list[str], list[float], list[str]]:
         config = base_config()
-        config["accounts"] = [{"name": name} for name in behaviours]
+        # names 允许重复：同名的两个账号要能真的配出两个来
+        config["accounts"] = [{"name": name} for name in (names or list(behaviours))]
         config["account_gap"] = {"enable": True, "min_minutes": gap_minutes, "max_minutes": gap_minutes}
         self.write_config(config)
 
         attempted: list[str] = []
         waited: list[float] = []
         done: list[str] = []
+        ip_calls: list[bool] = list(ip_results or [])
 
         class FakeGameCheckin:
             def __init__(self, client, config, account, emit=None):
@@ -197,7 +201,7 @@ class ResumeRunnerTest(IsolatedConfigTest):
             mock.patch.object(runner, "interruptible_sleep", lambda s, e=None: waited.append(s) or True),
             mock.patch.object(runner, "GameCheckin", FakeGameCheckin),
             mock.patch.object(runner, "ApiClient", _ctx),
-            mock.patch.object(runner, "ensure_mainland_ip", lambda *a, **k: True),
+            mock.patch.object(runner, "ensure_mainland_ip", lambda *a, **k: ip_calls.pop(0) if ip_calls else True),
             mock.patch.object(runner, "save_config", lambda *a, **k: None),
         ):
             lines = runner.run_tasks(
@@ -209,41 +213,88 @@ class ResumeRunnerTest(IsolatedConfigTest):
         return lines, attempted, waited, done
 
     def test_skipped_account_is_not_executed(self) -> None:
-        _, attempted, _, done = self._run({"大号": [], "小号": []}, skip={"大号"})
+        _, attempted, _, done = self._run({"大号": [], "小号": []}, skip={"1|大号"})
         self.assertEqual(attempted, ["小号"])
-        self.assertEqual(done, ["小号"])
+        self.assertEqual(done, ["2|小号"])
+
+    def test_old_name_only_progress_never_skips(self) -> None:
+        # 旧格式（纯名字）的进度键对不上新键 -> 只能重跑，绝不能误跳过
+        _, attempted, _, _ = self._run({"大号": [], "小号": []}, skip={"大号"}, gap_minutes=0)
+        self.assertEqual(attempted, ["大号", "小号"])
+
+    def test_same_name_accounts_do_not_shadow_each_other(self) -> None:
+        # 账号名会被截断且不校验唯一，两个「小号」不能互相顶掉
+        _, attempted, _, done = self._run(
+            {"小号": []}, names=["小号", "小号"], skip={"1|小号"}, gap_minutes=0
+        )
+        self.assertEqual(attempted, ["小号"], "被跳过的只是第一个同名账号")
+        self.assertEqual(done, ["2|小号"])
 
     def test_first_executed_account_does_not_wait(self) -> None:
         # 补跑时第一个真正执行的账号不能再等 1~2 小时
-        _, _, waited, _ = self._run({"大号": [], "小号": []}, skip={"大号"})
+        _, _, waited, _ = self._run({"大号": [], "小号": []}, skip={"1|大号"})
         self.assertEqual(waited, [], "补跑的第一个实际账号不该等待")
 
+    def test_ip_gate_does_not_take_an_execution_slot(self) -> None:
+        # 被出口 IP 门禁挡下的账号没真执行，不能占名额让下一个账号白等
+        _, attempted, waited, _ = self._run({"大号": [], "小号": []}, ip_results=[False, True])
+        self.assertEqual(attempted, ["小号"])
+        self.assertEqual(waited, [], "IP 门禁挡下的账号不该触发账号间隔等待")
+
+    def test_ip_gate_skips_only_real_waits(self) -> None:
+        _, attempted, waited, _ = self._run(
+            {"A": [], "B": [], "C": []}, ip_results=[False, True, True]
+        )
+        self.assertEqual(attempted, ["B", "C"])
+        self.assertEqual(waited, [1200.0], "B、C 之间只该等一次")
+
     def test_gap_applies_between_executed_accounts_only(self) -> None:
-        _, attempted, waited, _ = self._run({"大号": [], "小号": []}, skip={"大号", "小号"}, gap_minutes=0)
+        _, attempted, waited, _ = self._run({"大号": [], "小号": []}, skip={"1|大号", "2|小号"}, gap_minutes=0)
         self.assertEqual(attempted, [])
         self.assertEqual(waited, [], "全部跳过时不应等待")
-        _, _, waited2, _ = self._run({"A": [], "B": [], "C": []}, skip={"A"})
+        _, _, waited2, _ = self._run({"A": [], "B": [], "C": []}, skip={"1|A"})
         self.assertEqual(waited2, [1200.0], "B、C 之间应该只等一次")
 
     def test_skip_notice_is_logged(self) -> None:
-        lines, _, _, _ = self._run({"大号": [], "小号": []}, skip={"大号"})
+        lines, _, _, _ = self._run({"大号": [], "小号": []}, skip={"1|大号"})
         joined = "\n".join(lines)
         self.assertIn("账号 大号 今天已完成，跳过", joined)
         self.assertIn("账号 2/2: 小号", joined)
 
     def test_all_skipped_says_no_need_to_resume(self) -> None:
-        lines, _, _, _ = self._run({"大号": [], "小号": []}, skip={"大号", "小号"})
+        lines, _, _, _ = self._run({"大号": [], "小号": []}, skip={"1|大号", "2|小号"})
         self.assertIn("# 今天所有账号均已完成，无需补跑", lines)
 
-    def test_crashed_account_still_reports_done(self) -> None:
-        # 坏账号也要计入进度，否则补跑会一直卡在它身上
+    def test_all_skipped_notice_is_not_printed_when_stopped(self) -> None:
+        # 「已停止」和「全部已完成」不能同时出现
+        stop = threading.Event()
+        stop.set()
+        config = base_config()
+        config["accounts"] = [{"name": "大号"}]
+        self.write_config(config)
+        with (
+            mock.patch.object(runner, "ApiClient", _ctx),
+            mock.patch.object(runner, "ensure_mainland_ip", lambda *a, **k: True),
+            mock.patch.object(runner, "save_config", lambda *a, **k: None),
+        ):
+            lines = runner.run_tasks(
+                load_config(self.config_path),
+                str(self.config_path),
+                stop_event=stop,
+                skip_accounts={"1|大号"},
+            )
+        self.assertTrue(any("已停止" in line for line in lines), lines)
+        self.assertNotIn("# 今天所有账号均已完成，无需补跑", lines)
+
+    def test_crashed_account_is_not_marked_done(self) -> None:
+        # 崩掉的账号不算完成，下次启动还能再试一次
         _, attempted, _, done = self._run({"大号": ApiError("超时"), "小号": []}, gap_minutes=0)
         self.assertEqual(attempted, ["大号", "小号"])
-        self.assertEqual(done, ["大号", "小号"])
+        self.assertEqual(done, ["2|小号"])
 
     def test_manual_run_reports_done_in_order(self) -> None:
         _, _, _, done = self._run({"A": [], "B": []}, gap_minutes=0)
-        self.assertEqual(done, ["A", "B"])
+        self.assertEqual(done, ["1|A", "2|B"])
 
 
 if __name__ == "__main__":

@@ -92,7 +92,10 @@ class DailyScheduler:
             return set(self._resume_skip) if self._resume else set()
 
     def mark_account_done(self, name: str) -> None:
-        """记下一个账号已完成。只累加今天的进度，写盘失败不影响签到。"""
+        """记下一个账号已完成。name 是 runner 给的进度键（`序号|账号名`），这里只存不解析。
+
+        只累加今天的进度，写盘失败不影响签到；键对不上最多导致重跑，不会误跳过。
+        """
         name = str(name or "").strip()
         if not name or self._state.get("date") != datetime.now().date().isoformat():
             return

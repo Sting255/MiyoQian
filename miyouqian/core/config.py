@@ -477,6 +477,15 @@ def account_has_tasks(account: dict[str, Any]) -> bool:
     return isinstance(tasks, dict) and any(tasks.get(section) for section in ACCOUNT_TASK_SECTIONS)
 
 
+def account_key(index: int, name: Any) -> str:
+    """账号进度键：配置里的序号 + 账号名。
+
+    名字会被截断成 10 个字符、也不校验唯一，同名账号只能靠序号区分；
+    补跑时键对不上最多导致重跑，绝不会误跳过。
+    """
+    return f"{index}|{str(name or '未命名').strip()}"
+
+
 def account_config(config: dict[str, Any], account: dict[str, Any]) -> dict[str, Any]:
     """把账号级任务配置覆盖到全局配置上，返回该账号实际执行时使用的配置。"""
     effective = copy.deepcopy(config)

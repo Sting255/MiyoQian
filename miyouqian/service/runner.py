@@ -13,6 +13,7 @@ from ..core.config import (
     MAX_ACCOUNT_GAP_MINUTES,
     account_config,
     account_has_tasks,
+    account_key,
     find_account,
     save_config,
 )
@@ -82,6 +83,7 @@ def run_tasks(
     stop_event: threading.Event | None = None,
     skip_accounts: set[str] | None = None,
     on_account_done: Callable[[str], None] | None = None,
+    on_account_failed: Callable[[str], None] | None = None,
 ) -> list[str]:
     """跑一轮签到任务。
 
@@ -104,6 +106,7 @@ def run_tasks(
             stop_event,
             skip_accounts,
             on_account_done,
+            on_account_failed,
         )
     finally:
         captcha.release_matcher()
@@ -121,6 +124,7 @@ def _run_tasks(
     stop_event: threading.Event | None = None,
     skip_accounts: set[str] | None = None,
     on_account_done: Callable[[str], None] | None = None,
+    on_account_failed: Callable[[str], None] | None = None,
 ) -> list[str]:
     output: list[str] = []
 
@@ -147,6 +151,8 @@ def _run_tasks(
     account_push = bool((config.get("push") or {}).get("per_account", False))
     try:
         executed = 0
+        # 本轮有账号没签成（崩溃，或被出口 IP 门禁挡下）：调用方据此判定整轮没跑完
+        unfinished = False
         for index, account in enumerate(accounts, start=1):
             if stopped():
                 add("# ⏹ 已停止，剩余账号不再执行")
@@ -154,7 +160,7 @@ def _run_tasks(
             name = str(account.get("name") or "未命名")
             # 进度键带上配置序号：账号名会被截断成 10 个字符，同名账号不能互相顶掉。
             # 键对不上只会重跑，绝不会误跳过（旧格式的纯名字进度一律不匹配）。
-            key = f"{index}|{name}"
+            key = account_key(index, name)
             if skip_accounts and key in skip_accounts:
                 add(f"# 账号 {name} 今天已完成，跳过（断点续跑）")
                 continue
@@ -165,6 +171,10 @@ def _run_tasks(
                     add("# ⏹ 已停止，剩余账号不再执行")
                     break
                 add(f"# 跳过账号 {name}：出口 IP 未恢复")
+                # 被门禁挡下 = 今天这个账号没签成，整轮不能算「已了结」
+                unfinished = True
+                if on_account_failed:
+                    on_account_failed(key)
                 continue
             # 账号间加随机间隔，降低多账号被风控的概率；等待期间可以随时停止。
             # 具体等多久由配置段 account_gap 决定（网页「每日调度」里可改，0 = 不等）。
@@ -229,12 +239,16 @@ def _run_tasks(
             if account_push:
                 _push_account_result(config, add, account, output[start:])
             # 崩掉的账号不算完成：留给下次启动补跑再试一次，别把失败记成「今天已跑」。
-            if on_account_done and not crashed:
+            if crashed:
+                unfinished = True
+                if on_account_failed:
+                    on_account_failed(key)
+            elif on_account_done:
                 on_account_done(key)
             if stopped():
                 add("# ⏹ 已停止，剩余账号不再执行")
                 break
-        if skip_accounts and not executed and not stopped():
+        if skip_accounts and not executed and not stopped() and not unfinished:
             add("# 今天所有账号均已完成，无需补跑")
     finally:
         # 必须落盘：login 刷新出来的 cookie_token 存在内存配置里，

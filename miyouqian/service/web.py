@@ -241,6 +241,7 @@ class WebApp:
                 # 补跑：跳过今天已经跑完的账号，由 runner 保证第一个实际执行的账号不等待
                 skip_accounts=self.scheduler.resume_skip_accounts(),
                 on_account_done=self.scheduler.mark_account_done,
+                on_account_failed=self.scheduler.mark_account_failed,
             )
         except Exception as exc:
             push_result = send_push(config, "米游签任务失败", str(exc), success=False)

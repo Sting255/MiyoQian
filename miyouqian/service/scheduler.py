@@ -10,9 +10,15 @@ import threading
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
+from ..core.config import account_key
+
 
 LogFn = Callable[[str], None]
 RunFn = Callable[[threading.Event], list[str]]
+
+# 每个账号每天最多试几次。到了上限就不再因为它触发补跑：死 cookie 的账号否则
+# 每次重启都会刷一遍验证码，越刷越像机器人。
+MAX_ACCOUNT_ATTEMPTS = 2
 
 
 class DailyScheduler:
@@ -44,6 +50,8 @@ class DailyScheduler:
         # 本次执行是否「启动补跑」，以及补跑要跳过的账号（在 run_now 里按当时的状态文件快照）
         self._resume = False
         self._resume_skip: set[str] = set()
+        # 本轮没跑成的账号（崩溃 / 被出口 IP 门禁挡下），本轮结束时据它判定「今天还没了结」
+        self._unfinished_this_run: set[str] = set()
         self._schedule_signature = self._make_schedule_signature(self._schedule_config())
         self._log_next_run_on_recompute = False
 
@@ -104,6 +112,19 @@ class DailyScheduler:
             return
         done.append(name)
         self._save_state(accounts_done=done)
+
+    def mark_account_failed(self, name: str) -> None:
+        """记一次失败尝试（崩溃或 IP 门禁挡下），本轮因此不算跑完。
+
+        次数落盘：同一账号当天到 MAX_ACCOUNT_ATTEMPTS 就不再触发补跑。
+        """
+        key = str(name or "").strip()
+        if not key or self._state.get("date") != datetime.now().date().isoformat():
+            return
+        attempts = dict(self._state.get("accounts_attempts") or {})
+        attempts[key] = int(attempts.get(key) or 0) + 1
+        self._unfinished_this_run.add(key)
+        self._save_state(accounts_attempts=attempts)
 
     def stop_run(self) -> bool:
         """请求中断正在执行的任务。返回 False 表示当前没有任务在跑。"""
@@ -211,6 +232,7 @@ class DailyScheduler:
 
     def _run_once(self) -> None:
         self.log("开始执行签到任务")
+        self._unfinished_this_run = set()
         self._state_started()
         ok = False
         try:
@@ -223,6 +245,9 @@ class DailyScheduler:
                 # 用户主动停止：算「今天了结」，下次启动不再自动补跑
                 ok = True
                 self.log("签到任务已手动停止")
+            elif self._unfinished_this_run:
+                # 有账号没签成：今天还没了结，下次启动继续补（受尝试上限约束）
+                self.log("签到任务完成，但有账号没签成，下次启动会再补一次")
             else:
                 ok = True
                 self.log("签到任务执行完成")
@@ -286,12 +311,15 @@ class DailyScheduler:
         now = datetime.now()
         today = now.date().isoformat()
         # 新的一天从零开始；补跑时保留已有进度，否则第二次被打断又得从第一个账号重来
-        done = list(self._resume_skip) if self._state.get("date") == today else []
+        same_day = self._state.get("date") == today
+        done = list(self._resume_skip) if same_day else []
+        attempts = dict(self._state.get("accounts_attempts") or {}) if same_day else {}
         self._save_state(
             date=today,
             started_at=now.isoformat(timespec="seconds"),
             finished=False,
             accounts_done=done,
+            accounts_attempts=attempts,
         )
 
     def _state_finished(self, ok: bool) -> None:
@@ -314,7 +342,21 @@ class DailyScheduler:
             return False
         now = datetime.now()
         due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        return now >= due
+        return now >= due and not self._attempts_exhausted()
+
+    def _attempts_exhausted(self) -> bool:
+        """剩下的账号都试满上限了：今天不再补跑。
+
+        没有这层限制，一个死 cookie 账号会让每次重启都刷一遍验证码/登录。
+        """
+        attempts = self._state.get("accounts_attempts") or {}
+        done = set(self._state.get("accounts_done") or [])
+        remaining = [
+            account_key(index, (account or {}).get("name"))
+            for index, account in enumerate(self.config.get("accounts") or [], start=1)
+        ]
+        remaining = [key for key in remaining if key not in done]
+        return bool(remaining) and all(int(attempts.get(key) or 0) >= MAX_ACCOUNT_ATTEMPTS for key in remaining)
 
     def _schedule_config(self) -> dict[str, Any]:
         schedule = self.config.get("schedule", {})

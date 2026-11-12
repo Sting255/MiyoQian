@@ -24,7 +24,7 @@ from miyouqian.service.scheduler import DailyScheduler
 from tests.support import IsolatedConfigTest, base_config
 
 
-def make_config(*, catch_up: bool = True, time: str = "09:00") -> dict:
+def make_config(*, catch_up: bool = True, time: str = "09:00", accounts: list[str] | None = None) -> dict:
     return {
         "schedule": {
             "enable": True,
@@ -32,7 +32,8 @@ def make_config(*, catch_up: bool = True, time: str = "09:00") -> dict:
             "jitter_minutes": 0,
             "run_on_start": False,
             "catch_up": catch_up,
-        }
+        },
+        "accounts": [{"name": name} for name in (accounts or [])],
     }
 
 
@@ -173,6 +174,7 @@ class ResumeRunnerTest(IsolatedConfigTest):
         skip: set[str] | None = None,
         gap_minutes: int = 20,
         ip_results: list[bool] | None = None,
+        failed: list[str] | None = None,
     ) -> tuple[list[str], list[str], list[float], list[str]]:
         config = base_config()
         # names 允许重复：同名的两个账号要能真的配出两个来
@@ -209,6 +211,7 @@ class ResumeRunnerTest(IsolatedConfigTest):
                 str(self.config_path),
                 skip_accounts=skip,
                 on_account_done=done.append,
+                on_account_failed=(failed.append if failed is not None else None),
             )
         return lines, attempted, waited, done
 
@@ -288,13 +291,118 @@ class ResumeRunnerTest(IsolatedConfigTest):
 
     def test_crashed_account_is_not_marked_done(self) -> None:
         # 崩掉的账号不算完成，下次启动还能再试一次
-        _, attempted, _, done = self._run({"大号": ApiError("超时"), "小号": []}, gap_minutes=0)
+        failed: list[str] = []
+        _, attempted, _, done = self._run(
+            {"大号": ApiError("超时"), "小号": []}, gap_minutes=0, failed=failed
+        )
         self.assertEqual(attempted, ["大号", "小号"])
         self.assertEqual(done, ["2|小号"])
+        self.assertEqual(failed, ["1|大号"], "崩溃的账号要报给调度器，否则整轮会被当成已跑完")
+
+    def test_crashed_account_is_retried_without_waiting(self) -> None:
+        # 崩一次后，下一轮只补跑它，且它是第一个实际执行的账号 -> 不等待
+        _, _, _, done = self._run({"大号": ApiError("超时"), "小号": []}, gap_minutes=0)
+        self.assertEqual(done, ["2|小号"])
+        failed: list[str] = []
+        _, attempted, waited, _ = self._run({"大号": [], "小号": []}, skip={"2|小号"}, failed=failed)
+        self.assertEqual(attempted, ["大号"])
+        self.assertEqual(waited, [], "补试崩掉的账号不该再等 1~2 小时")
+        self.assertEqual(failed, [])
+
+    def test_ip_gate_all_blocked_does_not_claim_all_done(self) -> None:
+        # 剩余账号全被出口 IP 挡下：一个都没签，不能打「全部已完成」
+        failed: list[str] = []
+        lines, attempted, _, done = self._run(
+            {"大号": [], "小号": []}, skip={"1|大号"}, ip_results=[False], failed=failed
+        )
+        self.assertEqual(attempted, [])
+        self.assertEqual(done, [])
+        self.assertEqual(failed, ["2|小号"], "被 IP 门禁挡下的账号也算没签成")
+        self.assertNotIn("# 今天所有账号均已完成，无需补跑", lines)
+        self.assertTrue(any("出口 IP 未恢复" in line for line in lines), lines)
 
     def test_manual_run_reports_done_in_order(self) -> None:
         _, _, _, done = self._run({"A": [], "B": []}, gap_minutes=0)
         self.assertEqual(done, ["1|A", "2|B"])
+
+
+class UnfinishedRunTest(unittest.TestCase):
+    """没签成的那一轮不能算「今天已了结」，但同一账号每天最多试 2 次。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="myq-unfinished-")
+        self.addCleanup(self._tmp.cleanup)
+        self.state_path = pathlib.Path(self._tmp.name) / "run_state.json"
+
+    def make_scheduler(self, config: dict) -> DailyScheduler:
+        return DailyScheduler(config, lambda _stop: [], lambda _message: None, state_path=self.state_path)
+
+    def read_state(self) -> dict:
+        return json.loads(self.state_path.read_text(encoding="utf-8"))
+
+    def test_unfinished_account_keeps_today_open(self) -> None:
+        scheduler = self.make_scheduler(make_config(accounts=["大号", "小号"]))
+
+        def fake_run(_stop):
+            scheduler.mark_account_done("1|大号")
+            scheduler.mark_account_failed("2|小号")
+            return []
+
+        scheduler.run_fn = fake_run
+        scheduler._run_once()
+
+        state = self.read_state()
+        self.assertFalse(state["finished"], "有账号没签成却记成今天已完成，补跑就永远不会触发")
+        self.assertNotIn("finished_at", state, "没跑完不该更新 finished_at（网页会显示成上次执行成功）")
+        self.assertEqual(state["accounts_done"], ["1|大号"])
+        self.assertEqual(state["accounts_attempts"], {"2|小号": 1})
+
+    def test_all_done_marks_finished(self) -> None:
+        scheduler = self.make_scheduler(make_config(accounts=["大号"]))
+
+        def fake_run(_stop):
+            scheduler.mark_account_done("1|大号")
+            return []
+
+        scheduler.run_fn = fake_run
+        scheduler._run_once()
+
+        state = self.read_state()
+        self.assertTrue(state["finished"])
+        self.assertTrue(state["finished_at"])
+
+    def test_catch_up_fires_after_a_failure_then_stops_at_the_limit(self) -> None:
+        now = datetime.now()
+        base = (now - timedelta(minutes=1)).strftime("%H:%M")
+        today = now.date().isoformat()
+        config = make_config(time=base, accounts=["大号", "小号"])
+
+        self.state_path.write_text(
+            json.dumps({"date": today, "finished": False, "accounts_done": ["1|大号"], "accounts_attempts": {"2|小号": 1}}),
+            encoding="utf-8",
+        )
+        self.assertTrue(self.make_scheduler(config)._should_catch_up(), "崩过一次的账号应该还能补一次")
+
+        self.state_path.write_text(
+            json.dumps({"date": today, "finished": False, "accounts_done": ["1|大号"], "accounts_attempts": {"2|小号": 2}}),
+            encoding="utf-8",
+        )
+        self.assertFalse(
+            self.make_scheduler(config)._should_catch_up(), "试满 2 次后不该再因为它触发补跑"
+        )
+
+    def test_all_accounts_done_only_sweeps(self) -> None:
+        # 账号都跑完但没来得及写 finished（被杀在最后一步）：补跑只是空转一遍收尾
+        now = datetime.now()
+        base = (now - timedelta(minutes=1)).strftime("%H:%M")
+        today = now.date().isoformat()
+        self.state_path.write_text(
+            json.dumps({"date": today, "finished": False, "accounts_done": ["1|大号", "2|小号"]}),
+            encoding="utf-8",
+        )
+        scheduler = self.make_scheduler(make_config(time=base, accounts=["大号", "小号"]))
+        self.assertTrue(scheduler._should_catch_up())
+        self.assertFalse(scheduler._attempts_exhausted(), "没有剩余账号就不该被当成「试满了」")
 
 
 if __name__ == "__main__":

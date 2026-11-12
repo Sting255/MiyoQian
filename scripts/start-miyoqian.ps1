@@ -76,32 +76,48 @@ function Get-RuntimeInfo {
     }
 }
 
+function Test-PingOk([int]$port) {
+    # Ask the port who it is, instead of only asking "is anything listening".
+    # A hard-killed console leaves runtime.json behind; if another program then
+    # grabs that port, a listen-only check would keep the watchdog asleep forever
+    # and the console would stay offline.
+    if (-not $port) { return $false }
+    try {
+        $ping = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/ping" -TimeoutSec 2 -ErrorAction Stop
+        return ($ping.app -eq 'miyouqian')
+    } catch {
+        return $false
+    }
+}
+
 function Test-ServiceUp {
-    # Healthy service means: do not start another main.py (a second instance would
-    # bind another port and run a second scheduler, duplicating check-ins/pushes).
+    # Two misjudgements, both costly:
+    #   "healthy" when it is not -> the console stays offline and nothing restarts it;
+    #   "down" when it is up      -> a second instance binds another port and runs a
+    #                                second scheduler, duplicating check-ins and pushes.
     $info = Get-RuntimeInfo
     if ($null -ne $info) {
-        # 1. The pid from the runtime file is alive and running main.py: covers the
-        #    startup window (port not bound yet) and the fallback-to-other-port case.
+        # 1. The console answers on its recorded port and says it is us.
+        if (Test-PingOk ([int]$info.port)) { return $true }
+        # 2. Startup window: the recorded pid is alive and is a main.py process, but
+        #    the port is not bound yet. Also covers a console whose HTTP is wedged:
+        #    we prefer "do not start a second one" over "restart".
         if ($info.pid) {
             $proc = @(Get-CimInstance Win32_Process -Filter "ProcessId=$($info.pid)" -ErrorAction SilentlyContinue)
             if ($proc.Count -gt 0 -and $proc[0].CommandLine -match 'main\.py') {
                 return $true
             }
         }
-        # 2. The recorded port is listening.
-        if ($info.port) {
-            $listen = @(Get-NetTCPConnection -LocalPort ([int]$info.port) -State Listen -ErrorAction SilentlyContinue)
-            if ($listen.Count -gt 0) { return $true }
-        }
     }
-    # 3. No usable runtime file: look for a python/uv process running main.py from
-    #    this project directory.
+    # 3. No usable runtime file (deleted, data dir moved, the write failed): Windows
+    #    does not put the working directory into the command line, so match on
+    #    "main.py" plus either the uv launcher or the project dir when it is there.
+    #    Trade-off: a foreign `uv run python main.py` would also look healthy.
     $procs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
         $_.Name -match '^(python|pythonw|uv)\.exe$' -and
         $_.CommandLine -and
         $_.CommandLine -match 'main\.py' -and
-        $_.CommandLine -match [regex]::Escape($projectDir)
+        ($_.Name -eq 'uv.exe' -or $_.CommandLine -match [regex]::Escape($projectDir))
     })
     return ($procs.Count -gt 0)
 }

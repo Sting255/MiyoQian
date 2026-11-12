@@ -134,14 +134,16 @@ class WebApp:
         self.bound_port = 0
         self.started_at = datetime.now().isoformat(timespec="seconds")
 
-    def ping(self) -> dict[str, Any]:
-        """免认证探活：单实例检查与看门狗靠它确认「这个端口上是本应用」。"""
-        return {
-            "app": APP_ID,
-            "pid": os.getpid(),
-            "port": self.bound_port,
-            "started_at": self.started_at,
-        }
+    def ping(self, client: str = "") -> dict[str, Any]:
+        """免认证探活：单实例检查与看门狗靠它确认「这个端口上是本应用」。
+
+        只有回环来源才回 pid / started_at；外网模式下匿名请求只该知道是不是本应用。
+        """
+        info: dict[str, Any] = {"app": APP_ID, "port": self.bound_port}
+        if str(client) in ("127.0.0.1", "::1", "localhost"):
+            info["pid"] = os.getpid()
+            info["started_at"] = self.started_at
+        return info
 
     def _ensure_password_hashed(self) -> None:
         web = self.config.get("web", {})
@@ -1219,7 +1221,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/ping":
                 # 免认证：看门狗和单实例检查要在登录之前探活
-                self.send_json(self.app.ping())
+                self.send_json(self.app.ping(self.client_address[0]))
                 return
             if not self._is_authenticated() and path.startswith("/api/"):
                 self.send_error_json("未登录", HTTPStatus.UNAUTHORIZED)
@@ -1533,6 +1535,7 @@ def serve(config_path: pathlib.Path, host: str, port: int) -> None:
     runtime_file = runtime_path(config_path, app.config)
     # 先落 pid 占位：绑定端口之前有段启动窗口（导入 onnxruntime 就要几秒），
     # 这段时间里看门狗靠这个文件就知道「实例已经在起」，不会再去拉一个。
+    # 竞争互斥由 cli 的命名互斥体负责，这里只是给外部观察用的。
     write_runtime_file(runtime_file, host, 0, config_path)
     try:
         server, actual_port = create_server(host, port)
@@ -1592,7 +1595,9 @@ def create_server(host: str, port: int) -> tuple[ThreadingHTTPServer, int]:
     for candidate in _port_candidates(port):
         tried.append(candidate)
         try:
-            return ThreadingHTTPServer((host, candidate), Handler), candidate
+            server = ThreadingHTTPServer((host, candidate), Handler)
+            # 返回真正绑上的端口：候选端口写 0 时（测试里常见）它和 candidate 不同
+            return server, int(server.server_address[1])
         except OSError as exc:
             last_error = exc
             # 10013 = 端口被系统保留，10048 = 已被占用；其它错误直接抛

@@ -142,9 +142,39 @@ def command_run(
     return 0 if success else 1
 
 
+def _acquire_single_instance(name: str = r"Local\miyouqian-serve") -> object:
+    """取进程级单实例锁。拿到返回句柄，已被占用返回 None。
+
+    用命名互斥体而不是文件：进程退出（含被强杀）由系统自动释放，不存在
+    「残留文件判定存活」那类问题。拿不到就照常启动——锁本身出问题不能
+    变成「服务起不来」的理由。
+    """
+    if sys.platform != "win32":
+        return True
+    import ctypes
+
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+        handle = kernel32.CreateMutexW(None, 1, name)
+        if not handle:
+            return True
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(handle)
+            return None
+        return handle
+    except OSError:
+        return True
+
+
 def command_serve(config_path: pathlib.Path, host: str | None, port: int | None) -> int:
     from .service.web import find_running_instance, serve
 
+    if _acquire_single_instance() is None:
+        # 互斥体抢不到：另一个进程正在起控制台（可能它还没写 runtime.json）
+        print("已有实例正在运行（单实例锁被占用），本次不再启动")
+        return 0
     config = load_config(config_path)
     web = config.get("web", {})
     effective_host = host or str(web.get("host", "127.0.0.1"))

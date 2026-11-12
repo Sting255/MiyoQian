@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import threading
@@ -16,7 +18,8 @@ import urllib.error
 import urllib.request
 from unittest import mock
 
-from miyouqian.core.config import runtime_path
+from miyouqian import cli
+from miyouqian.core.config import load_config, runtime_path
 from miyouqian.service import web as web_mod
 from miyouqian.service.web import (
     APP_ID,
@@ -107,6 +110,13 @@ class PingEndpointTest(IsolatedConfigTest):
         self.assertEqual(body["port"], self.port)
         self.assertTrue(body["started_at"])
 
+    def test_ping_hides_pid_from_non_loopback_clients(self) -> None:
+        # 外网模式下匿名请求只该知道「是不是本应用」
+        body = self.app.ping("192.168.1.9")
+        self.assertEqual(set(body), {"app", "port"})
+        self.assertEqual(self.app.ping("127.0.0.1")["pid"], os.getpid())
+        self.assertEqual(self.app.ping("::1")["pid"], os.getpid())
+
     def test_other_api_still_requires_login(self) -> None:
         status, _ = self._get("/api/status")
         self.assertEqual(status, 401)
@@ -166,6 +176,119 @@ class FindRunningInstanceTest(IsolatedConfigTest):
         self.assertEqual(found["port"], 18990)
         self.assertEqual(found["url"], "http://127.0.0.1:18990")
         self.assertEqual(found["pid"], os.getpid())
+
+
+class EndToEndTest(IsolatedConfigTest):
+    """真实链路：写 runtime.json → 真服务器回 ping → find_running_instance。
+
+    这条链路以前零覆盖，两个 ps1 的 P2 就是从这里漏出去的，所以这里一律不 mock。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.config = base_config()
+        self.config["web"] = {"host": "127.0.0.1", "port": 0, "password": ""}
+        self.write_config(self.config)
+        self.app = WebApp(self.config_path, bound_host="127.0.0.1")
+        web_mod.Handler.app = self.app
+        self.server, _ = web_mod.create_server("127.0.0.1", 0)
+        self.port = int(self.server.server_address[1])
+        self.app.bound_port = self.port
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self._shutdown)
+
+    def _shutdown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+    def test_runtime_file_ping_and_detection_agree(self) -> None:
+        path = runtime_path(self.config_path, self.config)
+        write_runtime_file(path, "127.0.0.1", self.port, self.config_path)
+
+        found = find_running_instance(self.config_path, load_config(self.config_path))
+
+        self.assertIsNotNone(found)
+        self.assertEqual(found["pid"], os.getpid())
+        self.assertEqual(found["port"], self.port)
+        self.assertEqual(found["url"], f"http://127.0.0.1:{self.port}")
+
+    def test_detection_fails_when_the_port_belongs_to_another_app(self) -> None:
+        # 服务已死、端口被别的程序占住：不能当成「还活着」
+        path = runtime_path(self.config_path, self.config)
+        write_runtime_file(path, "127.0.0.1", 1, self.config_path)  # 1 号端口不会是本应用
+        self.assertIsNone(find_running_instance(self.config_path, load_config(self.config_path)))
+
+
+class ServeLifecycleTest(IsolatedConfigTest):
+    """serve() 两阶段写 runtime.json，停止时删掉自己那份。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.config = base_config()
+        self.config["web"] = {"host": "127.0.0.1", "port": 0, "password": ""}
+        self.write_config(self.config)
+        self.path = runtime_path(self.config_path, self.config)
+
+    def test_port_is_recorded_after_bind_and_file_removed_on_exit(self) -> None:
+        during: dict = {}
+
+        def fake_serve_forever(_self):
+            during.update(json.loads(self.path.read_text(encoding="utf-8")))
+            raise KeyboardInterrupt
+
+        with mock.patch.object(web_mod.ThreadingHTTPServer, "serve_forever", fake_serve_forever):
+            web_mod.serve(self.config_path, "127.0.0.1", 0)
+
+        self.assertEqual(during["app"], APP_ID)
+        self.assertEqual(during["pid"], os.getpid())
+        self.assertGreater(during["port"], 0, "绑定成功后必须写真实端口，而不是占位的 0")
+        self.assertFalse(self.path.exists(), "停止后要删掉自己写的 runtime.json")
+
+    def test_placeholder_is_removed_when_binding_fails(self) -> None:
+        with mock.patch.object(web_mod, "create_server", side_effect=OSError("端口全被占了")):
+            with self.assertRaises(OSError):
+                web_mod.serve(self.config_path, "127.0.0.1", 18990)
+        self.assertFalse(self.path.exists(), "起不来时不能留下占位文件骗看门狗")
+
+
+class CommandServeTest(IsolatedConfigTest):
+    """单实例：互斥体被占、或探测到已有实例，都让位（返回 0，不起服务）。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.write_config(base_config())
+
+    def _run(self, mutex, found):
+        out = io.StringIO()
+        with (
+            mock.patch.object(cli, "_acquire_single_instance", lambda: mutex),
+            mock.patch("miyouqian.service.web.find_running_instance", return_value=found),
+            mock.patch("miyouqian.service.web.serve") as serve_mock,
+            contextlib.redirect_stdout(out),
+        ):
+            code = cli.command_serve(self.config_path, None, None)
+        return code, out.getvalue(), serve_mock
+
+    def test_defers_when_mutex_is_busy(self) -> None:
+        code, output, serve_mock = self._run(None, None)
+        self.assertEqual(code, 0)
+        self.assertIn("已有实例正在运行", output)
+        serve_mock.assert_not_called()
+
+    def test_defers_when_a_live_instance_is_found(self) -> None:
+        found = {"pid": 4242, "port": 18990, "url": "http://127.0.0.1:18990"}
+        code, output, serve_mock = self._run(object(), found)
+        self.assertEqual(code, 0)
+        self.assertIn("http://127.0.0.1:18990", output)
+        self.assertIn("4242", output)
+        serve_mock.assert_not_called()
+
+    def test_starts_when_nothing_is_running(self) -> None:
+        code, _output, serve_mock = self._run(object(), None)
+        self.assertEqual(code, 0)
+        serve_mock.assert_called_once()
 
 
 if __name__ == "__main__":

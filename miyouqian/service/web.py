@@ -1526,6 +1526,10 @@ def find_running_instance(config_path: pathlib.Path, config: dict[str, Any]) -> 
         return None
     if info.get("app") != APP_ID or pid <= 0 or port <= 0:
         return None
+    # 同目录下另一份 config（比如 config-test.yaml）共享同一个 data/runtime.json，
+    # 那是另一份副本，不能把它当成「我自己已经在跑」。
+    if pathlib.Path(str(info.get("config_path") or "")).resolve() != pathlib.Path(config_path).resolve():
+        return None
     host = str(info.get("host") or "127.0.0.1")
     url = _runtime_url(host, port)
     # 用 ping 自查而不是查 pid 存活：Windows 上 os.kill(pid, 0) 会真的把进程结束掉。

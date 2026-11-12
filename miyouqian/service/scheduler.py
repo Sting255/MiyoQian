@@ -45,7 +45,11 @@ class DailyScheduler:
         self._state: dict[str, Any] = self._load_state()
         # 没跑成的那轮不写 finished_at，若只认 finished_at，界面会一直停在最后一次全成功的日子
         self._last_run = max(
-            (t for t in (self._parse_state_time(self._state.get(name)) for name in ("started_at", "finished_at")) if t),
+            (
+                t if t.tzinfo is None else t.astimezone().replace(tzinfo=None)
+                for t in (self._parse_state_time(self._state.get(name)) for name in ("started_at", "finished_at"))
+                if t
+            ),
             default=None,
         )
         self._last_error = ""

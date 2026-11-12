@@ -223,6 +223,15 @@ class EndToEndTest(IsolatedConfigTest):
         self.assertEqual(found["port"], self.port)
         self.assertEqual(found["url"], f"http://127.0.0.1:{self.port}")
 
+    def test_another_config_sharing_the_data_dir_is_not_blocked(self) -> None:
+        # 同目录另一份 config 共享 data/runtime.json：那是另一份副本，不该被「已有实例」挡回
+        path = runtime_path(self.config_path, self.config)
+        write_runtime_file(path, "127.0.0.1", self.port, self.config_path)
+        other = self.dir / "config-test.yaml"
+        other.write_text(self.config_path.read_text(encoding="utf-8"), encoding="utf-8")
+        self.assertIsNotNone(find_running_instance(self.config_path, load_config(self.config_path)))
+        self.assertIsNone(find_running_instance(other, load_config(self.config_path)))
+
     def test_detection_fails_when_the_port_belongs_to_another_app(self) -> None:
         # 服务已死、端口被别的程序占住：不能当成「还活着」
         path = runtime_path(self.config_path, self.config)

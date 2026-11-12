@@ -13,7 +13,6 @@ import pathlib
 import tempfile
 import threading
 import time
-import time
 import unittest
 from datetime import datetime, timedelta
 from unittest import mock
@@ -467,6 +466,15 @@ class UnfinishedRunTest(unittest.TestCase):
         )
         fresh = self.make_scheduler(make_config(accounts=["A"]))
         self.assertEqual(fresh.status()["last_run"], "2026-11-12T08:00:00")
+
+    def test_mixed_timezone_state_takes_the_later_one(self) -> None:
+        # 带时区与朴素混用：以前直接 max() 会抛 TypeError，把 DailyScheduler.__init__ 搞挂
+        self.state_path.write_text(
+            json.dumps({"date": "2026-11-10", "started_at": "2026-11-10T08:00:00+08:00", "finished_at": "2026-11-10T08:30:00"}),
+            encoding="utf-8",
+        )
+        scheduler = self.make_scheduler(make_config(accounts=["A"]))
+        self.assertEqual(scheduler.status()["last_run"], "2026-11-10T08:30:00")
 
     def test_all_accounts_done_only_sweeps(self) -> None:
         # 账号都跑完但没来得及写 finished（被杀在最后一步）：补跑只是空转一遍收尾

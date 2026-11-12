@@ -857,6 +857,17 @@ def run_state_path(config_path: str | pathlib.Path, config: dict[str, Any]) -> p
     return data_dir / str(storage.get("run_state_file") or "run_state.json")
 
 
+def runtime_path(config_path: str | pathlib.Path, config: dict[str, Any]) -> pathlib.Path:
+    """控制台运行时状态文件：实际监听端口 + pid。
+
+    控制台端口被占时会自动降级，外部（看门狗脚本、单实例检查）没法预先知道
+    实际端口，所以由服务自己把它写下来。
+    """
+    storage = config.get("storage", {})
+    data_dir = resolve_storage_path(config_path, str(storage.get("data_dir") or "data"))
+    return data_dir / "runtime.json"
+
+
 def resolve_storage_path(config_path: str | pathlib.Path, value: str) -> pathlib.Path:
     path = pathlib.Path(value)
     if path.is_absolute():

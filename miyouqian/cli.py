@@ -143,12 +143,18 @@ def command_run(
 
 
 def command_serve(config_path: pathlib.Path, host: str | None, port: int | None) -> int:
-    from .service.web import serve
+    from .service.web import find_running_instance, serve
 
     config = load_config(config_path)
     web = config.get("web", {})
     effective_host = host or str(web.get("host", "127.0.0.1"))
     effective_port = port or int(web.get("port", 5890))
+    running = find_running_instance(config_path, config)
+    if running:
+        # 两个调度器并存会重复签到、重复推送，所以这里直接让位。
+        # 探测本身失败（文件没了、端口不通、不是本应用）一律当没实例，照常启动。
+        print(f"已有实例在运行：{running['url']}（pid {running['pid']}），本次不再启动")
+        return 0
     try:
         serve(config_path, effective_host, effective_port)
     except OSError as exc:

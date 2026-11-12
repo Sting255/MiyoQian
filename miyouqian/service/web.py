@@ -9,10 +9,12 @@ import hashlib
 import io
 import json
 import mimetypes
+import os
 import pathlib
 import random
 import secrets
 import threading
+import urllib.request
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,7 +26,15 @@ import qrcode
 from ..auth.login import AigisRequired, CaptchaLogin, QRLogin, _QrRefreshed
 from ..core import captcha as captcha_mod
 from ..core import cookies, crypto
-from ..core.config import load_config, log_path, normalize_config, run_state_path, save_config, validate_unique_account_uids
+from ..core.config import (
+    load_config,
+    log_path,
+    normalize_config,
+    run_state_path,
+    runtime_path,
+    save_config,
+    validate_unique_account_uids,
+)
 from ..core.http import ApiClient, shop_client
 from ..core.geetest.browser import cleanup_stale_profiles
 from ..core.geetest.nine import self_check as captcha_self_check
@@ -37,6 +47,10 @@ from .runner import run_tasks
 from .scheduler import DailyScheduler
 
 WEB_ROOT = pathlib.Path(__file__).resolve().parents[1] / "webui"
+
+# 写进 runtime.json 与 /api/ping 的自我标识：用来确认端口上跑的是本应用，
+# 而不是碰巧占了同一个端口的别的程序。
+APP_ID = "miyouqian"
 
 # 「测试推送」用的示例日志：让用户在真正跑任务前就能看到推送长什么样
 TEST_PUSH_SAMPLE = """# 账号 1/1: 示例账号
@@ -116,6 +130,18 @@ class WebApp:
             lambda message: self.log(message, "exchange"),
         )
         self._sessions: dict[str, float] = {}
+        # 实际绑定端口（serve() 拿到后回填；0 表示还没绑上）
+        self.bound_port = 0
+        self.started_at = datetime.now().isoformat(timespec="seconds")
+
+    def ping(self) -> dict[str, Any]:
+        """免认证探活：单实例检查与看门狗靠它确认「这个端口上是本应用」。"""
+        return {
+            "app": APP_ID,
+            "pid": os.getpid(),
+            "port": self.bound_port,
+            "started_at": self.started_at,
+        }
 
     def _ensure_password_hashed(self) -> None:
         web = self.config.get("web", {})
@@ -1191,6 +1217,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/auth/status":
                 self.send_json(self.app.auth_status())
                 return
+            if path == "/api/ping":
+                # 免认证：看门狗和单实例检查要在登录之前探活
+                self.send_json(self.app.ping())
+                return
             if not self._is_authenticated() and path.startswith("/api/"):
                 self.send_error_json("未登录", HTTPStatus.UNAUTHORIZED)
                 return
@@ -1426,6 +1456,71 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"ok": False, "error": message}, status=status)
 
 
+def _runtime_url(host: str, port: int) -> str:
+    if port <= 0:
+        return ""
+    return f"http://{'127.0.0.1' if host in ('0.0.0.0', '') else host}:{port}"
+
+
+def write_runtime_file(path: pathlib.Path, host: str, port: int, config_path: pathlib.Path) -> None:
+    """写下实际监听端口，供看门狗与单实例检查读取。写不了只影响外部探测。"""
+    info = {
+        "app": APP_ID,
+        "pid": os.getpid(),
+        "host": host,
+        "port": port,
+        "url": _runtime_url(host, port),
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "config_path": str(pathlib.Path(config_path).resolve()),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def remove_runtime_file(path: pathlib.Path) -> None:
+    """只删自己写的那个：停旧实例不能把新实例的文件删掉。"""
+    try:
+        if int(json.loads(path.read_text(encoding="utf-8")).get("pid") or 0) == os.getpid():
+            path.unlink()
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+
+
+def _http_get_json(url: str, timeout: float = 2.0) -> Any:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def find_running_instance(config_path: pathlib.Path, config: dict[str, Any]) -> dict[str, Any] | None:
+    """已有同一应用在跑就返回 {"pid","port","url"}，否则 None。
+
+    保守原则：文件缺失、JSON 坏了、端口不通、返回的不是本应用 —— 一律当作「没有实例」
+    继续启动。宁可多起一个，也不能因为探测本身出问题导致控制台起不来。
+    """
+    try:
+        info = json.loads(runtime_path(config_path, config).read_text(encoding="utf-8"))
+        pid = int(info.get("pid") or 0)
+        port = int(info.get("port") or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    if info.get("app") != APP_ID or pid <= 0 or port <= 0:
+        return None
+    host = str(info.get("host") or "127.0.0.1")
+    url = _runtime_url(host, port)
+    # 用 ping 自查而不是查 pid 存活：Windows 上 os.kill(pid, 0) 会真的把进程结束掉。
+    # ping 回来的 pid 对得上，才说明这个端口上是那个进程、且是本应用。
+    ping = _http_get_json(f"{url}/api/ping")
+    if not isinstance(ping, dict) or ping.get("app") != APP_ID or int(ping.get("pid") or 0) != pid:
+        return None
+    return {"pid": pid, "port": port, "url": url}
+
+
 def serve(config_path: pathlib.Path, host: str, port: int) -> None:
     app = WebApp(config_path, bound_host=host)
     Handler.app = app
@@ -1435,7 +1530,17 @@ def serve(config_path: pathlib.Path, host: str, port: int) -> None:
         app.log(f"外网模式（监听 {host}），访问需要密码", "auth")
         if not app.password_is_set:
             app.log("尚未设置访问密码，请打开控制台后按提示设置", "auth")
-    server, actual_port = create_server(host, port)
+    runtime_file = runtime_path(config_path, app.config)
+    # 先落 pid 占位：绑定端口之前有段启动窗口（导入 onnxruntime 就要几秒），
+    # 这段时间里看门狗靠这个文件就知道「实例已经在起」，不会再去拉一个。
+    write_runtime_file(runtime_file, host, 0, config_path)
+    try:
+        server, actual_port = create_server(host, port)
+    except OSError:
+        remove_runtime_file(runtime_file)
+        raise
+    app.bound_port = actual_port
+    write_runtime_file(runtime_file, host, actual_port, config_path)
     if actual_port != port:
         app.log(f"端口 {port} 被占用，已切换到 {actual_port}", "startup")
     app.start()
@@ -1457,6 +1562,7 @@ def serve(config_path: pathlib.Path, host: str, port: int) -> None:
     finally:
         app.stop()
         server.server_close()
+        remove_runtime_file(runtime_file)
         app.log("Web 控制台已停止", "startup")
 
 

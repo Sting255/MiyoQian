@@ -51,9 +51,9 @@ if ($otherWatchdogs.Count -gt 0) {
 }
 
 # ---------------------------------------------------------------------------
-# Guard 2: if something is already serving port 5890, monitor it instead of
-# killing it. Restarting here would interrupt a check-in that is in progress;
-# the loop at the bottom already relaunches main.py if the port goes down.
+# Guard 2: if the console is already up, monitor it instead of killing it.
+# Restarting here would interrupt a check-in that is in progress; the loop at the
+# bottom already relaunches main.py if the service goes down.
 # ---------------------------------------------------------------------------
 $logsDir = Join-Path $projectDir 'logs'
 if (-not (Test-Path $logsDir)) {
@@ -61,6 +61,50 @@ if (-not (Test-Path $logsDir)) {
 }
 $stdoutLog = Join-Path $logsDir 'autostart.out.log'
 $stderrLog = Join-Path $logsDir 'autostart.err.log'
+
+# The console writes the port it actually bound into data/runtime.json, because
+# the configured port may be taken and the console then falls back to another one.
+$runtimeFile = Join-Path $projectDir 'data\runtime.json'
+
+function Get-RuntimeInfo {
+    # Returns the parsed runtime file, or $null when it is missing or unreadable.
+    if (-not (Test-Path -LiteralPath $runtimeFile)) { return $null }
+    try {
+        return (Get-Content -LiteralPath $runtimeFile -Raw -ErrorAction Stop) | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+}
+
+function Test-ServiceUp {
+    # Healthy service means: do not start another main.py (a second instance would
+    # bind another port and run a second scheduler, duplicating check-ins/pushes).
+    $info = Get-RuntimeInfo
+    if ($null -ne $info) {
+        # 1. The pid from the runtime file is alive and running main.py: covers the
+        #    startup window (port not bound yet) and the fallback-to-other-port case.
+        if ($info.pid) {
+            $proc = @(Get-CimInstance Win32_Process -Filter "ProcessId=$($info.pid)" -ErrorAction SilentlyContinue)
+            if ($proc.Count -gt 0 -and $proc[0].CommandLine -match 'main\.py') {
+                return $true
+            }
+        }
+        # 2. The recorded port is listening.
+        if ($info.port) {
+            $listen = @(Get-NetTCPConnection -LocalPort ([int]$info.port) -State Listen -ErrorAction SilentlyContinue)
+            if ($listen.Count -gt 0) { return $true }
+        }
+    }
+    # 3. No usable runtime file: look for a python/uv process running main.py from
+    #    this project directory.
+    $procs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -match '^(python|pythonw|uv)\.exe$' -and
+        $_.CommandLine -and
+        $_.CommandLine -match 'main\.py' -and
+        $_.CommandLine -match [regex]::Escape($projectDir)
+    })
+    return ($procs.Count -gt 0)
+}
 
 function Invoke-MainPy {
     # Start-Process redirects at the OS level, so the child's bytes are written
@@ -72,9 +116,8 @@ function Invoke-MainPy {
     return $process.ExitCode
 }
 
-$listening = @(Get-NetTCPConnection -LocalPort 5890 -State Listen -ErrorAction SilentlyContinue)
-if ($listening.Count -gt 0) {
-    Write-Host "[start-miyoqian] port 5890 is already served by PID $($listening[0].OwningProcess); monitoring it"
+if (Test-ServiceUp) {
+    Write-Host "[start-miyoqian] console already running; monitoring it"
 } else {
     Set-Location $projectDir
     $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
@@ -83,15 +126,14 @@ if ($listening.Count -gt 0) {
     Write-Host "[start-miyoqian] main.py exited with code $exitCode"
 }
 
-# Watchdog loop: keep this script alive and relaunch main.py if the port goes
+# Watchdog loop: keep this script alive and relaunch main.py if the service goes
 # down. Sleeps 60s between checks to avoid wasting CPU. Without this loop the
 # script would exit after main.py dies and the Web UI would stay down until the
 # next logon.
 while ($true) {
     Start-Sleep -Seconds 60
-    $listen = @(Get-NetTCPConnection -LocalPort 5890 -State Listen -ErrorAction SilentlyContinue)
-    if ($listen.Count -eq 0) {
-        Write-Host "[start-miyoqian] watchdog: port 5890 down, relaunching main.py"
+    if (-not (Test-ServiceUp)) {
+        Write-Host "[start-miyoqian] watchdog: service down, relaunching main.py"
         Set-Location $projectDir
         $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
         $code = Invoke-MainPy

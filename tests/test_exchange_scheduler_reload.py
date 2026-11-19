@@ -13,6 +13,9 @@ class ExchangeSchedulerReloadTest(unittest.TestCase):
 
     def make_plan(self, goods_id: str = "target") -> dict:
         return {
+            "plan_id": f"plan-{goods_id}",
+            "plan_version": "v1",
+            "account_uid": "101",
             "goods_id": goods_id,
             "goods_name": goods_id,
             "account_index": 0,
@@ -22,7 +25,7 @@ class ExchangeSchedulerReloadTest(unittest.TestCase):
             "last_attempt_key": "",
         }
 
-    def make_scheduler(self, plans: list[dict], run_plan_fn=lambda _index: None) -> ExchangeScheduler:
+    def make_scheduler(self, plans: list[dict], run_plan_fn=lambda *_identity: None) -> ExchangeScheduler:
         return ExchangeScheduler(
             {"shop_exchange": {"enable": True, "plans": plans}},
             run_plan_fn,
@@ -45,17 +48,17 @@ class ExchangeSchedulerReloadTest(unittest.TestCase):
         start_worker.assert_called_once()
 
     @patch.object(PlanWorker, "start")
-    def test_reordered_worker_runs_current_plan_index(self, _start_worker) -> None:
-        executed: list[int] = []
+    def test_reordered_worker_runs_stable_plan_identity(self, _start_worker) -> None:
+        executed: list[tuple] = []
         target = self.make_plan()
-        scheduler = self.make_scheduler([{}, {}, {}, {}, {}, {}, target], executed.append)
+        scheduler = self.make_scheduler([{}, {}, {}, {}, {}, {}, target], lambda *identity: executed.append(identity))
         scheduler.start()
         worker = next(iter(scheduler._workers.values()))
 
         scheduler.reload({"shop_exchange": {"enable": True, "plans": [target]}})
-        worker.run_fn(worker.index)
+        worker.run_fn(target["plan_id"], scheduler._attempt_key(target, self.exchange_at), target["plan_version"])
 
-        self.assertEqual(executed, [0])
+        self.assertEqual(executed, [("plan-target", f"target:{self.exchange_at}", "v1")])
 
 
 if __name__ == "__main__":

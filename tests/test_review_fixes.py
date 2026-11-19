@@ -241,24 +241,24 @@ class ExchangeWorkerUpdateTest(unittest.TestCase):
         self.assertEqual(worker.index, 0)
         self.assertIs(worker.plan, updated)
 
-    def test_fired_worker_uses_the_updated_index(self) -> None:
-        fired: list[int] = []
+    def test_fired_worker_uses_stable_identity_after_reorder(self) -> None:
+        fired: list[tuple] = []
         worker = PlanWorker(
             index=6,
             plan={"goods_id": "B"},
             exchange_at=PAST,
             attempt_key="B:1",
-            run_fn=fired.append,
+            run_fn=lambda *identity: fired.append(identity),
             log_fn=lambda message: None,
         )
-        worker.update(0, {"goods_id": "B"})
+        worker.update(0, {"goods_id": "B", "plan_id": "p", "plan_version": "v1"})
         with mock.patch.object(es, "sync_server_time_offset", lambda log: 0.0):
             worker._loop()
-        self.assertEqual(fired, [0], "worker 用了过期的索引")
+        self.assertEqual(fired, [("p", f"B:{PAST}", "v1")], "worker 未按稳定身份执行")
 
     def test_reload_updates_a_retained_worker_in_place(self) -> None:
         plans = [{} for _ in range(6)] + [
-            {"goods_id": "T", "exchange_at": PAST + 99999, "enable": True, "auto": True, "account_index": 0}
+            {"plan_id": "p", "plan_version": "v1", "account_uid": "101", "goods_id": "T", "exchange_at": int(time.time()) + 3600, "enable": True, "auto": True, "account_index": 0}
         ]
         scheduler = self._scheduler(plans)
         with mock.patch.object(es.PlanWorker, "start", lambda self: None):
@@ -266,8 +266,7 @@ class ExchangeWorkerUpdateTest(unittest.TestCase):
         worker = next(iter(scheduler._workers.values()))
         self.assertEqual(worker.index, 6)
 
-        updated = {"goods_id": "T", "exchange_at": PAST + 99999, "enable": True, "auto": True,
-                   "account_index": 0, "goods_name": "改名了"}
+        updated = {**plans[-1], "goods_name": "改名了"}
         scheduler.reload({"shop_exchange": {"enable": True, "plans": [updated]}})
 
         self.assertIs(next(iter(scheduler._workers.values())), worker, "线程被重建了，应该原地复用")
@@ -275,7 +274,7 @@ class ExchangeWorkerUpdateTest(unittest.TestCase):
         self.assertIs(worker.plan, updated)
 
     def test_deleted_plan_removes_its_worker(self) -> None:
-        plans = [{"goods_id": "T", "exchange_at": PAST + 99999, "enable": True, "auto": True}]
+        plans = [{"plan_id": "p", "account_uid": "101", "goods_id": "T", "exchange_at": int(time.time()) + 3600, "enable": True, "auto": True}]
         scheduler = self._scheduler(plans)
         with mock.patch.object(es.PlanWorker, "start", lambda self: None):
             scheduler._rebuild_workers()

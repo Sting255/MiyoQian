@@ -53,15 +53,28 @@ function gtBoot() {
         } catch (error) {
           window.__gt.result = null;
         }
+        if (!window.__gt.result || !window.__gt.result.geetest_validate) {
+          window.__gt.status = "error";
+          window.__gt.message = "onSuccess: 未取得有效验证结果";
+          window.__gt.result = null;
+          return;
+        }
         window.__gt.status = "success";
+        window.__gt.message = "";
       });
       captchaObj.onError(function (error) {
         window.__gt.status = "error";
+        window.__gt.result = null;
         window.__gt.message =
           "onError: " + (error && error.msg ? error.msg : String(error));
       });
       captchaObj.onClose(function () {
-        window.__gt.status = "closed";
+        // nine.solve 只等待 success/error；关闭必须成为它能读取的终态。
+        // 成功后的自动收起不能覆盖尚未被 Python 读取的验证结果。
+        if (window.__gt.status === "success") return;
+        window.__gt.status = "error";
+        window.__gt.message = "onClose: 验证码窗口已关闭";
+        window.__gt.result = null;
       });
     }
   );

@@ -38,6 +38,11 @@ let config = null;
 let toastTimer = null;
 let autoSaveTimer = null;
 let isSavingConfig = false;
+let configSaveQueue = Promise.resolve();
+let configEditVersion = 0;
+let configSavedVersion = 0;
+let pendingConfigSaves = 0;
+let configLoadSeq = 0;
 let lastLoginStatus = "";
 let activeLoginIndex = null;
 let localLoginPanel = null;
@@ -92,7 +97,12 @@ function showToast(message) {
 }
 
 async function loadConfig() {
-  config = await api("/api/config");
+  if (hasPendingConfigEdits()) return;
+  const version = configEditVersion;
+  const seq = ++configLoadSeq;
+  const incoming = await api("/api/config");
+  if (seq !== configLoadSeq || version !== configEditVersion || hasPendingConfigEdits()) return;
+  config = incoming;
   config.accounts = (config.accounts || []).map((account) => ({
     ...account,
     _draft: false,
@@ -751,7 +761,7 @@ function renderAccounts() {
     ? accounts
         .map(
           (account, index) => `
-        <div class="account-row" data-index="${index}" data-draft="${account._draft ? "1" : "0"}">
+        <div class="account-row" data-index="${index}" data-draft="${account._draft ? "1" : "0"}" data-draft-id="${escapeAttr(account._draft_id || "")}">
           <div class="account-main">
             <div class="account-title">
               <strong>
@@ -1177,6 +1187,7 @@ function collectChipSelection(chips, keyOf, fallback) {
 
 function collectConfig() {
   config.schedule = {
+    ...(config.schedule || {}),
     enable: $("scheduleEnable").checked,
     time: $("scheduleTime").value || "09:00",
     jitter_minutes: Number($("scheduleJitter").value || 0),
@@ -1262,6 +1273,7 @@ function collectConfig() {
       if (accountTasks) item.tasks = accountTasks;
       item.name = (item.name || "").slice(0, 10);
       item._draft = row.dataset.draft === "1";
+      if (item._draft) item._draft_id = row.dataset.draftId || "";
       return item;
     },
   );
@@ -1610,21 +1622,30 @@ function renderShopPlans() {
   bindShopPlanEvents();
 }
 
+function shopPlanAccountIndex(plan) {
+  const uid = String(plan?.account_uid || "");
+  if (!uid) return -1;
+  const matches = (config.accounts || []).map((account, index) => ({ account, index }))
+    .filter(({ account }) => String(account.stuid || "") === uid && account.cookie);
+  return matches.length === 1 ? matches[0].index : -1;
+}
+
 function shopPlanRow(plan, index) {
   const accounts = config.accounts || [];
+  const boundIndex = shopPlanAccountIndex(plan);
+  const needsConfirmation = boundIndex < 0;
   const paused = plan.enable === false;
   const open = shopOpenPlans.has(String(index)) ? "open" : "";
   const roleDisplay = shopRoleDisplay(plan);
   const serverDisplay = shopServerDisplay(plan);
-  const accountOptions = accounts.length
-    ? accounts
+  const accountOptions = `<option value="" ${needsConfirmation ? "selected" : ""}>请重新选择并确认账号</option>` + accounts
         .map((account, accountIndex) => {
-          const selected =
-            Number(plan.account_index || 0) === accountIndex ? "selected" : "";
-          return `<option value="${accountIndex}" ${selected}>${escapeHtml(accountLabel(account))}</option>`;
+          const uid = String(account.stuid || "");
+          if (!uid || !account.cookie) return "";
+          const selected = boundIndex === accountIndex ? "selected" : "";
+          return `<option value="${escapeAttr(uid)}" ${selected}>${escapeHtml(accountLabel(account))}</option>`;
         })
-        .join("")
-    : `<option value="0">暂无账号</option>`;
+        .join("");
   return `
     <details class="shop-plan ${paused ? "is-paused" : ""}" data-shop-plan="${index}" ${open}>
       <summary class="shop-plan-summary">
@@ -1640,7 +1661,7 @@ function shopPlanRow(plan, index) {
       <div class="shop-plan-body">
         <div class="shop-plan-head">
           <label class="check-row">
-            <input data-shop-plan-field="enable" type="checkbox" ${plan.enable !== false ? "checked" : ""} data-autosave />
+            <input data-shop-plan-field="enable" type="checkbox" ${!needsConfirmation && plan.enable !== false ? "checked" : ""} ${needsConfirmation ? "disabled" : ""} data-autosave />
             <span>启用该计划</span>
           </label>
           <button class="ghost icon-only" type="button" data-shop-remove="${index}" title="删除计划">
@@ -1651,7 +1672,7 @@ function shopPlanRow(plan, index) {
         <label>
           <span>执行账号</span>
           <div class="select-wrapper">
-             <select data-shop-plan-field="account_index" data-autosave>${accountOptions}</select>
+             <select data-shop-plan-field="account_uid" data-autosave>${accountOptions}</select>
              <svg class="select-arrow" width="12" height="8" aria-hidden="true">
                  <use href="#arrow-down"/>
              </svg>
@@ -1682,6 +1703,8 @@ function shopPlanRow(plan, index) {
           <strong>${escapeHtml(serverDisplay)}</strong>
         </div>
       </div>
+      <input data-shop-plan-field="plan_id" type="hidden" value="${escapeAttr(plan.plan_id || "")}" />
+      <input data-shop-plan-field="plan_version" type="hidden" value="${escapeAttr(plan.plan_version || "")}" />
       <input data-shop-plan-field="auto" type="hidden" value="${plan.auto === false ? "false" : "true"}" />
       <input data-shop-plan-field="goods_id" type="hidden" value="${escapeAttr(plan.goods_id || "")}" />
       <input data-shop-plan-field="goods_name" type="hidden" value="${escapeAttr(plan.goods_name || "")}" />
@@ -1701,7 +1724,7 @@ function shopPlanRow(plan, index) {
       <input data-shop-plan-field="last_run" type="hidden" value="${escapeAttr(plan.last_run || "")}" />
       <div class="shop-plan-foot">
         <span>${escapeHtml(shopPlanStatus(plan))}</span>
-        <button class="ghost" type="button" data-shop-plan-now="${index}" title="立即执行该兑换计划">
+        <button class="ghost" type="button" data-shop-plan-now="${index}" title="立即执行该兑换计划" ${needsConfirmation ? "disabled" : ""}>
           <svg><use href="#i-play"></use></svg>
           <span>立即兑换</span>
         </button>
@@ -1766,12 +1789,18 @@ function bindShopPlanEvents() {
     });
   });
   document
-    .querySelectorAll('[data-shop-plan-field="account_index"]')
+    .querySelectorAll('[data-shop-plan-field="account_uid"]')
     .forEach((select) => {
       select.addEventListener("change", () => {
         const row = select.closest("[data-shop-plan]");
         const index = Number(row?.dataset.shopPlan);
         collectConfig();
+        const plan = config.shop_exchange?.plans?.[index];
+        if (!plan) return;
+        plan.enable = false;
+        for (const key of ["uid", "region", "role_name", "region_name", "address_id"]) plan[key] = "";
+        renderShopPlans();
+        scheduleAutoSave();
         refreshShopPlanRole(index)
           .catch((error) => showToast(error.message))
           .then(() => refreshShopPlanAddresses(index))
@@ -1795,7 +1824,8 @@ function collectShopExchange() {
     plans: [],
   };
   document.querySelectorAll("[data-shop-plan]").forEach((row) => {
-    const plan = {};
+    const previous = existing.plans?.[Number(row.dataset.shopPlan)] || {};
+    const plan = { ...previous };
     row.querySelectorAll("[data-shop-plan-field]").forEach((field) => {
       const key = field.dataset.shopPlanField;
       if (key === "enable") plan[key] = field.checked;
@@ -1806,6 +1836,9 @@ function collectShopExchange() {
       else if (key === "auto") plan[key] = field.value !== "false";
       else plan[key] = field.value.trim();
     });
+    plan.account_index = shopPlanAccountIndex(plan);
+    plan.needs_account_confirmation = plan.account_index < 0;
+    if (plan.needs_account_confirmation) plan.enable = false;
     if (plan.goods_id) shop.plans.push(plan);
   });
   return shop;
@@ -1816,8 +1849,8 @@ async function addShopPlan(good) {
   if (!canShopGoodAddPlan(good))
     throw new Error("商品已售罄，不能加入兑换计划");
 
-  const accountIndex = await chooseShopPlanAccount(good);
-  if (accountIndex === null) return;
+  const accountUid = await chooseShopPlanAccount(good);
+  if (accountUid === null) return;
 
   collectConfig();
   config.shop_exchange = config.shop_exchange || {
@@ -1827,12 +1860,13 @@ async function addShopPlan(good) {
     plans: [],
   };
 
-  if (!(config.accounts || [])[accountIndex]?.stuid) {
+  const accountIndex = shopPlanAccountIndex({ account_uid: accountUid });
+  if (accountIndex < 0) {
     throw new Error("请先添加并登录账号");
   }
 
   const existingIndex = config.shop_exchange.plans.findIndex(
-    (p) => p.goods_id === good.goods_id && p.account_index === accountIndex,
+    (p) => p.goods_id === good.goods_id && p.account_uid === accountUid,
   );
 
   if (existingIndex >= 0) {
@@ -1841,13 +1875,21 @@ async function addShopPlan(good) {
   }
 
   const accountName = accountLabel(config.accounts[accountIndex]);
-  const checkError = await checkShopAccountLogin(accountIndex);
+  const checkError = await checkShopAccountLogin(accountUid);
   if (checkError) {
     showToast(`${accountName} 登录已过期，请重新登录`);
     return;
   }
 
-  const plan = await buildShopPlan(good, accountIndex);
+  const plan = await buildShopPlan(good, accountUid);
+  // 等待接口期间表单和计划列表可能已改变，先收集最新编辑再去重、重绘。
+  collectConfig();
+  plan.account_index = shopPlanAccountIndex(plan);
+  if (plan.account_index < 0) throw new Error("兑换账号已删除或退出登录，请重新选择");
+  if (config.shop_exchange.plans.some((p) => p.goods_id === plan.goods_id && p.account_uid === accountUid)) {
+    showToast("同账号已有相同计划");
+    return;
+  }
   config.shop_exchange.plans.push(plan);
   const planIndex = config.shop_exchange.plans.length - 1;
   renderShopPlans();
@@ -1888,16 +1930,16 @@ async function exchangeGoodNow(good) {
   if (isShopGoodSoldOut(good)) throw new Error("商品已售罄，不能兑换");
   if (!canShopGoodExchangeNow(good)) throw new Error("商品还未开启兑换");
   collectConfig();
-  const accountIndex = await chooseShopExchangeAccount(good);
-  if (accountIndex === null) return;
-  if (!(config.accounts || [])[accountIndex]?.stuid) {
+  const accountUid = await chooseShopExchangeAccount(good);
+  if (accountUid === null) return;
+  if (shopPlanAccountIndex({ account_uid: accountUid }) < 0) {
     throw new Error("请先添加并登录账号");
   }
   shopRequestInFlight = true;
   shopExchangeNowGoodsId = String(good.goods_id || "");
   renderShopGoods();
   try {
-    const plan = await buildShopPlan(good, accountIndex);
+    const plan = await buildShopPlan(good, accountUid);
     await exchangePlanNow(plan);
   } finally {
     shopExchangeNowGoodsId = "";
@@ -1907,36 +1949,44 @@ async function exchangeGoodNow(good) {
 }
 
 async function exchangePlanNow(planOrIndex) {
-  const body =
-    typeof planOrIndex === "number"
-      ? { plan_index: planOrIndex }
-      : { plan: planOrIndex };
-  if (body.plan === null || body.plan === undefined)
-    throw new Error("兑换计划不存在");
+  let body;
+  if (typeof planOrIndex === "number") {
+    collectConfig();
+    const plan = config.shop_exchange?.plans?.[planOrIndex];
+    if (!plan?.plan_id) throw new Error("兑换计划不存在");
+    if (shopPlanAccountIndex(plan) < 0) throw new Error("请重新选择并确认兑换账号");
+    const planId = plan.plan_id;
+    const saved = await autoSaveConfig();
+    if (hasPendingConfigEdits()) throw new Error("配置已修改，请保存后再次兑换");
+    const confirmed = saved.config?.shop_exchange?.plans?.find((p) => p.plan_id === planId);
+    if (!confirmed) throw new Error("兑换计划已删除，请刷新页面");
+    body = { plan_id: planId, plan_version: confirmed.plan_version };
+  } else {
+    if (!planOrIndex || shopPlanAccountIndex(planOrIndex) < 0) throw new Error("请先选择已登录账号");
+    body = { plan: planOrIndex };
+  }
   const response = await api("/api/shop/exchange", {
     method: "POST",
     body: JSON.stringify(body),
   });
   const result = response.result || {};
-  if (response.config) {
-    config = response.config;
-    config.accounts = (config.accounts || []).map((account) => ({
-      ...account,
-      _draft: false,
-    }));
-    renderConfig();
-  }
   showToast(`兑换请求完成：${result.message || "未知结果"}`);
   await refreshStatus();
 }
 
-async function buildShopPlan(good, accountIndex) {
+async function buildShopPlan(good, accountUid) {
+  accountUid = String(accountUid || "");
+  const accountIndex = shopPlanAccountIndex({ account_uid: accountUid });
+  if (accountIndex < 0) throw new Error("请先选择已登录账号");
   const fpData = await api("/api/shop/device-fp");
   const detail = await api(
     `/api/shop/good-detail?goods_id=${encodeURIComponent(good.goods_id)}`,
   );
   const base = { ...good, ...detail };
   const plan = {
+    plan_id: crypto.randomUUID ? crypto.randomUUID() :
+      Array.from(crypto.getRandomValues(new Uint8Array(16)), (n) => n.toString(16).padStart(2, "0")).join(""),
+    account_uid: accountUid,
     enable: true,
     auto: true,
     account_index: accountIndex,
@@ -1964,7 +2014,7 @@ async function buildShopPlan(good, accountIndex) {
       throw new Error("商品详情缺少 game_biz，无法自动匹配游戏角色");
     }
     const meta = await api(
-      `/api/shop/account-meta?account_index=${accountIndex}&game_biz=${encodeURIComponent(plan.game_biz)}`,
+      `/api/shop/account-meta?account_uid=${encodeURIComponent(accountUid)}&game_biz=${encodeURIComponent(plan.game_biz)}`,
     );
     const role = (meta.roles || [])[0];
     if (!role) {
@@ -1975,29 +2025,38 @@ async function buildShopPlan(good, accountIndex) {
     plan.role_name = role.nickname || "";
     plan.region_name = role.region_name || "";
   }
+  plan.account_index = shopPlanAccountIndex(plan);
+  if (plan.account_index < 0) throw new Error("兑换账号已删除或退出登录，请重新选择");
   return plan;
 }
 
 async function refreshShopPlanRole(index) {
   collectConfig();
   const plan = config.shop_exchange?.plans?.[index];
-  if (!plan || !plan.game_biz) return;
+  if (!plan || !plan.game_biz || shopPlanAccountIndex(plan) < 0) return;
+  const planId = plan.plan_id;
+  const accountUid = plan.account_uid;
+  const gameBiz = plan.game_biz;
   const meta = await api(
-    `/api/shop/account-meta?account_index=${plan.account_index}&game_biz=${encodeURIComponent(plan.game_biz)}`,
+    `/api/shop/account-meta?account_uid=${encodeURIComponent(accountUid)}&game_biz=${encodeURIComponent(gameBiz)}`,
   );
+  // 保存表单会复制计划对象；按稳定身份复查，并先采集等待期间的新编辑。
+  collectConfig();
+  const current = config.shop_exchange?.plans?.find((item) => item.plan_id === planId);
+  if (!planId || !current || current.account_uid !== accountUid || current.game_biz !== gameBiz) return;
   const role = (meta.roles || [])[0];
   if (!role) {
-    plan.uid = "";
-    plan.region = "";
-    plan.role_name = "";
-    plan.region_name = "";
+    current.uid = "";
+    current.region = "";
+    current.role_name = "";
+    current.region_name = "";
     renderShopPlans();
     throw new Error("当前账号未找到对应游戏角色");
   }
-  plan.uid = role.uid || "";
-  plan.region = role.region || "";
-  plan.role_name = role.nickname || "";
-  plan.region_name = role.region_name || "";
+  current.uid = role.uid || "";
+  current.region = role.region || "";
+  current.role_name = role.nickname || "";
+  current.region_name = role.region_name || "";
   renderShopPlans();
   await autoSaveConfig();
   showToast("游戏角色已更新");
@@ -2005,58 +2064,67 @@ async function refreshShopPlanRole(index) {
 
 async function refreshShopPlanAddresses(index, autoFill = false) {
   const plan = config.shop_exchange?.plans?.[index];
-  if (!plan || Number(plan.type || 0) === 2) return;
-  const accountIndex = Number(plan.account_index || 0);
+  if (!plan || Number(plan.type || 0) === 2 || shopPlanAccountIndex(plan) < 0) return;
+  const planId = plan.plan_id;
+  const accountUid = plan.account_uid;
   const select = document.querySelector(
     `[data-shop-plan="${index}"] [data-address-select]`,
   );
   if (!select) return;
   const currentValue = plan.address_id || "";
-  select.innerHTML = `<option value="">加载中...</option>`;
+  // 禁用加载中的控件也会被 collectConfig 读取，必须保留其原值。
+  select.innerHTML = `<option value="${escapeAttr(currentValue)}">加载中...</option>`;
   select.disabled = true;
   try {
     const meta = await api(
-      `/api/shop/account-meta?account_index=${accountIndex}`,
+      `/api/shop/account-meta?account_uid=${encodeURIComponent(accountUid)}`,
     );
-    const addresses = meta.addresses || [];
-    shopPlanAddressCache.set(accountIndex, addresses);
-    select.innerHTML = buildAddressOptions(addresses, currentValue);
+    collectConfig();
+    const currentIndex = config.shop_exchange?.plans?.findIndex((item) => item.plan_id === planId) ?? -1;
+    const current = config.shop_exchange?.plans?.[currentIndex];
+    if (!planId || !current || current.account_uid !== accountUid) return;
+    if (meta.addresses_error || !Array.isArray(meta.addresses)) throw new Error("获取地址失败");
+    const addresses = meta.addresses;
+    shopPlanAddressCache.set(accountUid, addresses);
+    const currentSelect = document.querySelector(`[data-shop-plan="${currentIndex}"] [data-address-select]`);
+    if (!currentSelect?.isConnected) return;
+    const selectedId = current.address_id || "";
+    currentSelect.innerHTML = buildAddressOptions(addresses, selectedId);
     // 只在 autoFill=true 时自动填充第一个地址
-    if (autoFill && !currentValue && addresses.length) {
+    if (autoFill && !selectedId && addresses.length) {
       const firstId = String(addresses[0].id || "");
-      select.value = firstId;
-      plan.address_id = firstId;
-    } else if (!autoFill && !currentValue && addresses.length) {
-      // 不自动填充时，只在UI上选择第一个作为默认显示
-      const firstId = String(addresses[0].id || "");
-      select.value = firstId;
-    } else if (currentValue && !addresses.some((a) => String(a.id) === currentValue)) {
-      select.innerHTML =
-        `<option value="${escapeAttr(currentValue)}">${escapeHtml(currentValue)}（已失效）</option>` +
-        select.innerHTML;
-      select.value = currentValue;
+      currentSelect.value = firstId;
+      current.address_id = firstId;
     }
+    currentSelect.disabled = false;
   } catch {
-    select.innerHTML = `<option value="${escapeAttr(currentValue)}">${currentValue ? escapeHtml(currentValue) : "获取地址失败"}</option>`;
+    collectConfig();
+    const currentIndex = config.shop_exchange?.plans?.findIndex((item) => item.plan_id === planId) ?? -1;
+    const current = config.shop_exchange?.plans?.[currentIndex];
+    if (!planId || !current || current.account_uid !== accountUid) return;
+    const currentSelect = document.querySelector(`[data-shop-plan="${currentIndex}"] [data-address-select]`);
+    if (!currentSelect?.isConnected) return;
+    const selectedId = current.address_id || "";
+    currentSelect.innerHTML = `<option value="${escapeAttr(selectedId)}" selected>${selectedId ? escapeHtml(selectedId) + "（获取地址失败）" : "获取地址失败"}</option>`;
+    currentSelect.disabled = false;
   } finally {
     select.disabled = false;
   }
 }
 
 function shopPlanAddressSelectHtml(plan) {
-  const accountIndex = Number(plan.account_index || 0);
-  const cached = shopPlanAddressCache.get(accountIndex);
-  if (!cached) return `<option value="">加载中...</option>`;
-  // 不再自动修改 plan.address_id
-  // 如果 plan.address_id 为空，UI上可以选择第一个，但不写入配置
-  // if (!plan.address_id && cached.length) {
-  //   plan.address_id = String(cached[0].id || "");
-  // }
+  if (shopPlanAccountIndex(plan) < 0) return `<option value="">请先确认账号</option>`;
+  const cached = shopPlanAddressCache.get(plan.account_uid);
+  if (!cached) return `<option value="${escapeAttr(plan.address_id || "")}">加载中...</option>`;
   return buildAddressOptions(cached, plan.address_id || "");
 }
 
 function buildAddressOptions(addresses, selectedId) {
-  const options = [];
+  selectedId = String(selectedId || "");
+  const options = [`<option value="" ${selectedId ? "" : "selected"}>请选择收货地址</option>`];
+  if (selectedId && !addresses.some((addr) => String(addr.id) === selectedId)) {
+    options.push(`<option value="${escapeAttr(selectedId)}" selected>${escapeHtml(selectedId)}（已失效）</option>`);
+  }
   for (const addr of addresses) {
     const id = String(addr.id || "");
     const label = [addr.name, addr.address].filter(Boolean).join(" - ");
@@ -2139,8 +2207,8 @@ function chooseShopExchangeAccount(good) {
               <select id="shopExchangeAccountSelect">
                     ${choices
               .map(
-                  ({ account, index }) =>
-                    `<option value="${index}">${escapeHtml(accountLabel(account))}</option>`,
+                  ({ account }) =>
+                    `<option value="${escapeAttr(String(account.stuid))}">${escapeHtml(accountLabel(account))}</option>`,
               )
               .join("")}
               </select>
@@ -2169,13 +2237,13 @@ function chooseShopExchangeAccount(good) {
     });
     overlay
       .querySelector("[data-modal-confirm]")
-      ?.addEventListener("click", () => finish(Number(select.value)));
+      ?.addEventListener("click", () => finish(select.value));
     overlay.addEventListener("click", (event) => {
       if (event.target === overlay) finish(null);
     });
     overlay.addEventListener("keydown", (event) => {
       if (event.key === "Escape") finish(null);
-      if (event.key === "Enter") finish(Number(select.value));
+      if (event.key === "Enter") finish(select.value);
     });
     select.focus();
   });
@@ -2206,8 +2274,8 @@ function chooseShopPlanAccount(good) {
           <select id="shopPlanAccountSelect">
             ${choices
               .map(
-                ({ account, index }) =>
-                `<option value="${index}">${escapeHtml(accountLabel(account))}</option>`,
+                ({ account }) =>
+                `<option value="${escapeAttr(String(account.stuid))}">${escapeHtml(accountLabel(account))}</option>`,
                 )
               .join("")}
             </select>
@@ -2236,22 +2304,22 @@ function chooseShopPlanAccount(good) {
     });
     overlay
       .querySelector("[data-modal-confirm]")
-      ?.addEventListener("click", () => finish(Number(select.value)));
+      ?.addEventListener("click", () => finish(select.value));
     overlay.addEventListener("click", (event) => {
       if (event.target === overlay) finish(null);
     });
     overlay.addEventListener("keydown", (event) => {
       if (event.key === "Escape") finish(null);
-      if (event.key === "Enter") finish(Number(select.value));
+      if (event.key === "Enter") finish(select.value);
     });
     select.focus();
   });
 }
 
-async function checkShopAccountLogin(accountIndex) {
+async function checkShopAccountLogin(accountUid) {
   try {
     const meta = await api(
-      `/api/shop/account-meta?account_index=${accountIndex}`,
+      `/api/shop/account-meta?account_uid=${encodeURIComponent(accountUid)}`,
     );
     const errors = [
       meta.points_error || "",
@@ -2301,6 +2369,7 @@ async function withButtonLoading(button, loadingText, task) {
 }
 
 function shopPlanStatus(plan) {
+  if (shopPlanAccountIndex(plan) < 0) return "请重新选择并确认账号";
   if (plan.last_result) {
     return `${plan.enable === false ? "已暂停，" : ""}最近结果：${plan.last_result}`;
   }
@@ -2353,7 +2422,7 @@ function serverConfig({ includeDrafts = true } = {}) {
   const payload = JSON.parse(JSON.stringify(config));
   payload.accounts = (payload.accounts || [])
     .filter((account) => includeDrafts || !account._draft)
-    .map(({ _draft, ...account }) => account);
+    .map(({ _draft, _draft_id, ...account }) => account);
 
   const pushChannels = payload.push?.channels || [];
   for (const channel of pushChannels) {
@@ -2380,38 +2449,48 @@ function validateUniqueAccountUids(accounts) {
   });
 }
 
-async function saveConfig(message = "配置已保存") {
-  const payload = serverConfig({ includeDrafts: true });
+function hasPendingConfigEdits() {
+  return isSavingConfig || configEditVersion !== configSavedVersion;
+}
+
+function enqueueConfigSave(includeDrafts) {
+  const payload = serverConfig({ includeDrafts });
   validateUniqueAccountUids(payload.accounts || []);
+  const body = JSON.stringify(payload);
+  const version = ++configEditVersion;
+  clearTimeout(autoSaveTimer);
+  pendingConfigSaves += 1;
   isSavingConfig = true;
-  try {
-    await api("/api/config", {
+  const operation = configSaveQueue.then(async () => {
+    const response = await api("/api/config", {
       method: "POST",
-      body: JSON.stringify(payload),
+      body,
     });
-    showToast(message);
-    await loadConfig();
-  } finally {
-    isSavingConfig = false;
-  }
+    configSavedVersion = Math.max(configSavedVersion, version);
+    return response;
+  }).finally(() => {
+    pendingConfigSaves -= 1;
+    isSavingConfig = pendingConfigSaves > 0;
+  });
+  // 某次失败仍交给调用者显示；不能阻断排在后面的新编辑。
+  configSaveQueue = operation.catch(() => {});
+  return operation;
+}
+
+async function saveConfig(message = "配置已保存") {
+  const response = await enqueueConfigSave(true);
+  showToast(message);
+  await loadConfig();
+  return response;
 }
 
 async function autoSaveConfig() {
-  const payload = serverConfig({ includeDrafts: false });
-  validateUniqueAccountUids(payload.accounts || []);
-  isSavingConfig = true;
-  try {
-    await api("/api/config", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-  } finally {
-    isSavingConfig = false;
-  }
+  return enqueueConfigSave(false);
 }
 
 function scheduleAutoSave() {
-  if (!config || isSavingConfig) return;
+  if (!config) return;
+  configEditVersion += 1;
   clearTimeout(autoSaveTimer);
   autoSaveTimer = setTimeout(() => {
     autoSaveConfig()
@@ -2421,6 +2500,8 @@ function scheduleAutoSave() {
 }
 
 async function refreshStatus() {
+  const version = configEditVersion;
+  const canApplyConfig = !hasPendingConfigEdits();
   const status = await api("/api/status");
   const scheduler = status.scheduler || {};
   const exchangeScheduler = status.exchange_scheduler || {};
@@ -2454,6 +2535,7 @@ async function refreshStatus() {
   if (
     shopExchange &&
     config &&
+    canApplyConfig && version === configEditVersion && !hasPendingConfigEdits() &&
     !shopRequestInFlight &&
     !isEditingShopConfig()
   ) {
@@ -2465,7 +2547,7 @@ async function refreshStatus() {
   if (login.running) {
     clearLoginCountdown();
     localLoginPanel = null;
-    activeLoginIndex = login.account_index ?? activeLoginIndex;
+    activeLoginIndex = loginAccountIndex(login);
   }
   renderLoginSlot(login);
   $("runBtn").disabled = Boolean(scheduler.running);
@@ -2529,7 +2611,7 @@ function renderLoginSlot(login, options = {}) {
   if (!hasServerPanel) {
     return;
   }
-  const index = login.account_index ?? activeLoginIndex ?? -1;
+  const index = loginAccountIndex(login);
   const slot = document.querySelector(`[data-login-slot="${index}"]`);
   if (!slot) return;
 
@@ -3226,6 +3308,8 @@ function emptyAccount(name) {
     mid: "",
     cloud_games: emptyAccountCloudGames(),
     _draft: true,
+    _draft_id: crypto.randomUUID ? crypto.randomUUID() :
+      Array.from(crypto.getRandomValues(new Uint8Array(16)), (n) => n.toString(16).padStart(2, "0")).join(""),
   };
 }
 
@@ -3249,12 +3333,21 @@ function stripClientAccount(account) {
   return payload;
 }
 
+function loginAccountIndex(login) {
+  if (!login.draft) return login.account_index ?? activeLoginIndex ?? -1;
+  if (!login.draft_id) return -1;
+  const matches = (config.accounts || []).map((account, index) => ({ account, index }))
+    .filter(({ account }) => account._draft && account._draft_id === login.draft_id);
+  return matches.length === 1 ? matches[0].index : -1;
+}
+
 function applyDraftLogin(login) {
   collectConfig();
-  const index = login.account_index ?? activeLoginIndex;
+  const index = loginAccountIndex({ ...login, draft: true });
   const account = config.accounts[index];
   const accountData = login.account_data || {};
   if (!account || !account._draft || !accountData.stuid) {
+    showToast("登录目标已变更，请重新登录");
     return;
   }
   Object.assign(account, {
@@ -3262,6 +3355,8 @@ function applyDraftLogin(login) {
     stuid: accountData.stuid || "",
     stoken: accountData.stoken || "",
     mid: accountData.mid || "",
+    ltoken: accountData.ltoken || "",
+    cookie_token: accountData.cookie_token || "",
     _draft: true,
   });
   editingAccountIndex = index;

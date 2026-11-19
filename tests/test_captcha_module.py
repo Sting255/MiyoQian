@@ -400,7 +400,10 @@ class DebugDirTest(unittest.TestCase):
             captured["gt"] = gt
             return ("validate", "passed-challenge")
 
+        folder = make_case_dir()
+        self.addCleanup(__import__("shutil").rmtree, folder, True)
         with mock.patch.object(captcha, "_local_matcher", lambda channel, emit: object()), \
+             mock.patch.object(captcha, "_debug_dir", return_value=folder / "captcha_debug"), \
              mock.patch.object(nine, "solve", fake_solve):
             result = captcha._solve_local(
                 {"provider": "local", "headless": True, "max_attempts": 5},

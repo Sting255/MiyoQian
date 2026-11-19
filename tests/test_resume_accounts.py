@@ -358,7 +358,10 @@ class UnfinishedRunTest(unittest.TestCase):
 
         state = self.read_state()
         self.assertFalse(state["finished"], "有账号没签成却记成今天已完成，补跑就永远不会触发")
-        self.assertNotIn("finished_at", state, "没跑完不该更新 finished_at（网页会显示成上次执行成功）")
+        self.assertFalse(
+            state.get("finished_at"),
+            "没跑完不该留下 finished_at（网页会显示成上次执行成功）",
+        )
         self.assertEqual(state["accounts_done"], ["1|大号"])
         self.assertEqual(state["accounts_attempts"], {"2|小号": 1})
 

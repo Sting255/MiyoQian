@@ -90,10 +90,10 @@ class HttpJitterTest(unittest.TestCase):
         app.config = base_config()
         app.lock = threading.RLock()
         app.log = lambda *a, **k: None
-        app._account_by_index = lambda index: {"name": "A", "cookie": "c", "stuid": "1"}
+        app.config["accounts"] = [{"name": "A", "cookie": "c", "stuid": "1"}]
         app._send_exchange_push = lambda *a, **k: None
 
-        plan = {"goods_id": "100", "device_fp": "fp", "account_index": 0}
+        plan = {"goods_id": "100", "device_fp": "fp", "account_uid": "1"}
         with mock.patch.object(web_mod, "ShopExchange", CaptureShop):
             web_mod.WebApp.shop_exchange_once(app, plan)
 

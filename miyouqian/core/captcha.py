@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import gc
+import json
 import pathlib
+import re
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable
+from uuid import uuid4
 
 from .http import ApiClient
 
@@ -79,6 +83,12 @@ def _solve(
 _LOCAL_MATCHER: Any = None
 # 保护上面那个全局单例：加载/释放都走它，避免重叠任务各加载一份 139MB 的模型
 _MATCHER_LOCK = threading.Lock()
+_DEBUG_LOCK = threading.Lock()
+_DEBUG_KEEP_SESSIONS = 20
+_DEBUG_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+_DEBUG_KIND = "miyouqian.captcha-debug"
+_DEBUG_SESSION_NAME = re.compile(r"session-\d{8}T\d{12}Z-[0-9a-f]{12}\Z")
+_DEBUG_ARTIFACT_NAME = re.compile(r"attempt\d+-\d{6}(?:-grid\.png|-icon\.png|\.json)\Z")
 
 
 def _solve_local(
@@ -89,28 +99,63 @@ def _solve_local(
     emit: Callable[[str], None] | None,
 ) -> CaptchaSolution | None:
     """用本机 Chrome + 视觉模型在本地解极验九宫格，不依赖第三方打码服务。"""
+    debug_dir: pathlib.Path | None = None
+    succeeded = False
+    error_type = ""
+    counts = {key: 0 for key in (
+        "callback_timeout", "image_fetch_error", "attempt_error", "panel_missing", "callback_not_passed",
+    )}
+
+    def log(message: str) -> None:
+        # nine.py 的这条文案只出现在 wait_for(timeout=12) 超时分支，
+        # 并不是服务端明确判错。只校正文案，不改变点选、等待或重试行为。
+        if re.fullmatch(r"第 \d+ 次点选未通过：答案被拒绝", message):
+            counts["callback_timeout"] += 1
+            message = message.removesuffix("答案被拒绝") + "12 秒内未收到成功或错误回调（超时，不能认定答案错误）"
+        elif "九宫格图片获取失败:" in message:
+            counts["image_fetch_error"] += 1
+        elif re.match(r"第 \d+ 次尝试异常：", message):
+            counts["attempt_error"] += 1
+        elif re.match(r"第 \d+ 次未取到九宫格结构", message):
+            counts["panel_missing"] += 1
+        elif re.match(r"第 \d+ 次点选未通过：", message):
+            counts["callback_not_passed"] += 1
+        if emit:
+            emit(message)
+
     try:
         from .geetest import nine
 
-        matcher = _local_matcher(channel, emit)
-        debug_dir = _debug_dir(config)
-        # 只保留这一次求解的现场，避免 data/captcha_debug/ 越积越多
-        # （只删本模块自己生成的 attempt*-grid.png / -icon.png / *.json）
-        nine.reset_debug_dir(debug_dir)
+        debug_dir = _prepare_debug_session(_debug_dir(config), log)
+        matcher = _local_matcher(channel, log)
         validate, passed_challenge = nine.solve(
             gt,
             challenge,
             matcher=matcher,
-            emit=emit,
+            emit=log,
             headless=bool(channel.get("headless", True)),
             max_attempts=int(channel.get("max_attempts") or 5),
             debug_dir=debug_dir,
         )
+        succeeded = True
         return CaptchaSolution(validate=validate, challenge=passed_challenge)
     except Exception as exc:
+        error_type = type(exc).__name__
         if emit:
             emit(f"本地验证码识别失败: {exc}")
         return None
+    finally:
+        if debug_dir is not None:
+            _finish_debug_session(debug_dir, succeeded, error_type, counts, log)
+        if emit and any(counts.values()):
+            emit(
+                "本地验证码诊断："
+                f"回调超时 {counts['callback_timeout']} 次，"
+                f"图片获取失败 {counts['image_fetch_error']} 次，"
+                f"其他尝试异常 {counts['attempt_error']} 次，"
+                f"面板缺失 {counts['panel_missing']} 次，"
+                f"回调返回未通过 {counts['callback_not_passed']} 次"
+            )
 
 
 def _debug_dir(config: dict[str, Any]) -> pathlib.Path:
@@ -130,6 +175,98 @@ def _debug_dir(config: dict[str, Any]) -> pathlib.Path:
     if base.is_absolute():
         return base / "captcha_debug"
     return repo_data.parent / base / "captcha_debug"
+
+
+def _write_debug_summary(folder: pathlib.Path, summary: dict[str, Any]) -> None:
+    temporary = folder / "summary.json.tmp"
+    temporary.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(folder / "summary.json")
+
+
+def _prepare_debug_session(
+    root: pathlib.Path, emit: Callable[[str], None],
+) -> pathlib.Path | None:
+    """每次外层求解独立存图；诊断目录不可写时仍继续识别。"""
+    try:
+        now = datetime.now(timezone.utc)
+        name = f"session-{now:%Y%m%dT%H%M%S%fZ}-{uuid4().hex[:12]}"
+        with _DEBUG_LOCK:
+            root.mkdir(parents=True, exist_ok=True)
+            folder = root / name
+            folder.mkdir()
+            _write_debug_summary(folder, {
+                "kind": _DEBUG_KIND, "version": 1, "status": "running", "started_at": now.isoformat(),
+            })
+    except OSError:
+        emit("验证码现场目录不可写（不影响识别，无法保存本轮现场）")
+        return None
+    emit(f"验证码现场编号：{name}")
+    return folder
+
+
+def _finish_debug_session(
+    folder: pathlib.Path, succeeded: bool, error_type: str,
+    counts: dict[str, int], emit: Callable[[str], None],
+) -> None:
+    try:
+        with _DEBUG_LOCK:
+            summary = json.loads((folder / "summary.json").read_text(encoding="utf-8"))
+            if not isinstance(summary, dict):
+                raise ValueError("invalid debug summary")
+            summary.update(
+                status="success" if succeeded else "failed",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                counts=dict(counts), error_type=error_type,
+            )
+            # 不保存 gt、challenge、validate、URL、账号或原始异常消息。
+            _write_debug_summary(folder, summary)
+            _prune_debug_sessions(folder.parent)
+    except (OSError, ValueError):
+        emit("验证码现场摘要或历史清理失败（不影响识别）")
+
+
+def _prune_debug_sessions(root: pathlib.Path) -> None:
+    """仅清理本模块已完成的现场；运行中的目录、旧文件、用户文件均保留。"""
+    completed: list[tuple[float, pathlib.Path]] = []
+    resolved_root = root.resolve()
+    for folder in root.iterdir():
+        if not _DEBUG_SESSION_NAME.fullmatch(folder.name):
+            continue
+        try:
+            # 不跟随符号链接或 Windows junction 越过现场根目录。
+            if folder.is_symlink() or not folder.is_dir() or folder.resolve() != resolved_root / folder.name:
+                continue
+            manifest = folder / "summary.json"
+            if manifest.is_symlink() or manifest.stat().st_size > 16_384:
+                continue
+            summary = json.loads(manifest.read_text(encoding="utf-8"))
+            if not isinstance(summary, dict) or summary.get("kind") != _DEBUG_KIND or summary.get("version") != 1:
+                continue
+            if summary.get("status") not in ("success", "failed"):
+                continue
+            finished = datetime.fromisoformat(str(summary.get("finished_at") or ""))
+            if finished.tzinfo is None:
+                continue
+            completed.append((finished.timestamp(), folder))
+        except (OSError, ValueError, OverflowError):
+            continue
+    completed.sort(key=lambda entry: (entry[0], entry[1].name), reverse=True)
+    now = datetime.now(timezone.utc).timestamp()
+    for index, (finished_at, folder) in enumerate(completed):
+        if index < _DEBUG_KEEP_SESSIONS and now - finished_at <= _DEBUG_MAX_AGE_SECONDS:
+            continue
+        try:
+            # 不递归删除；混入用户文件或子目录的现场留给人工处理。
+            files = list(folder.iterdir())
+            if any(item.is_symlink() or not item.is_file() or (
+                item.name != "summary.json" and not _DEBUG_ARTIFACT_NAME.fullmatch(item.name)
+            ) for item in files):
+                continue
+            for item in files:
+                item.unlink()
+            folder.rmdir()
+        except OSError:
+            continue
 
 
 def _local_matcher(channel: dict[str, Any], emit: Callable[[str], None] | None) -> Any:

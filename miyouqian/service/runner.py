@@ -84,6 +84,7 @@ def run_tasks(
     skip_accounts: set[str] | None = None,
     on_account_done: Callable[[str], None] | None = None,
     on_account_failed: Callable[[str], None] | None = None,
+    persist: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[str]:
     """跑一轮签到任务。
 
@@ -107,6 +108,7 @@ def run_tasks(
             skip_accounts,
             on_account_done,
             on_account_failed,
+            persist,
         )
     finally:
         captcha.release_matcher()
@@ -125,6 +127,7 @@ def _run_tasks(
     skip_accounts: set[str] | None = None,
     on_account_done: Callable[[str], None] | None = None,
     on_account_failed: Callable[[str], None] | None = None,
+    persist: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[str]:
     output: list[str] = []
 
@@ -253,7 +256,10 @@ def _run_tasks(
     finally:
         # 必须落盘：login 刷新出来的 cookie_token 存在内存配置里，
         # 异常路径跳过这一步就等于把刚续上的登录态丢了。
-        save_config(config_path, config)
+        if persist is not None:
+            persist(config)
+        else:
+            save_config(config_path, config)
     return output
 
 

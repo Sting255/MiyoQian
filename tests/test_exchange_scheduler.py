@@ -19,6 +19,9 @@ class ExchangeSchedulerWorkerKeyTest(unittest.TestCase):
         last_attempt_key: str = "",
     ) -> dict:
         return {
+            "plan_id": f"plan-{goods_id}-{account_index}",
+            "plan_version": "v1",
+            "account_uid": str(account_index),
             "goods_id": goods_id,
             "goods_name": goods_id,
             "account_index": account_index,
@@ -31,7 +34,7 @@ class ExchangeSchedulerWorkerKeyTest(unittest.TestCase):
     def make_scheduler(self, plans: list[dict]) -> ExchangeScheduler:
         return ExchangeScheduler(
             {"shop_exchange": {"enable": True, "plans": plans}},
-            lambda _index: None,
+            lambda *_identity: None,
             lambda _message: None,
         )
 
@@ -50,8 +53,8 @@ class ExchangeSchedulerWorkerKeyTest(unittest.TestCase):
         self.assertEqual(
             set(scheduler._workers),
             {
-                f"0:same-good:{self.exchange_at}",
-                f"1:same-good:{self.exchange_at}",
+                "plan-same-good-0:v1",
+                "plan-same-good-1:v1",
             },
         )
         self.assertEqual(start_worker.call_count, 2)

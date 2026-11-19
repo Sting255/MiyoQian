@@ -26,6 +26,14 @@ PUSH_TEMPLATE_DIR = pathlib.Path(__file__).resolve().parents[1] / "templates" / 
 # 推送必须据此判成失败，否则「一个账号挂了、另一个正常」会被总结成任务完成。
 ACCOUNT_CRASH_MARKER = "❌ 账号执行异常，已跳过该账号剩余任务"
 
+# 任务级致命错误：任务本身没跑成，但不会生成「失败项：」行。
+# 不单独识别的话，推送标题写着失败、账号卡片却是绿点且看不到原因
+# （典型场景：cookie/stoken 过期，米游币任务连状态都拿不到）。
+TASK_ERROR_MARKERS = (
+    "任务状态获取失败，请检查 cookie/stoken",
+    "获取帖子列表失败，无法执行看帖/点赞/分享",
+)
+
 # 正文长度上限：pushplus / 钉钉 / Telegram 对正文都有上限，
 # 多账号 + 长异常串时整条推送会被服务端拒收，所以统一截断详细日志。
 DETAIL_LIMIT_TELEGRAM = 2600
@@ -59,11 +67,20 @@ class PushFailed(RuntimeError):
     """推送服务返回了业务错误（HTTP 200 但内容是失败）。"""
 
 
-def send_push(config: dict[str, Any], title: str, message: str, success: bool = True) -> str:
+def send_push(
+    config: dict[str, Any],
+    title: str,
+    message: str,
+    success: bool = True,
+    force: bool = False,
+) -> str:
     push = config.get("push") or {}
     if not push.get("enable"):
         return ""
-    if push.get("error_only") and success:
+    # force=True 用于「测试推送」这类必须真发的场景：
+    # 开了 error_only 之后它不能被当成「成功通知」静默吞掉，
+    # 否则用户点测试推送什么都收不到，还以为通道坏了。
+    if push.get("error_only") and success and not force:
         return ""
     channels = push_channels(push)
     if not channels:
@@ -492,11 +509,17 @@ def format_sent_at(value: Any) -> str:
         return text.replace("T", " ").split(".")[0] or fallback
 
 
+def task_error_items(lines: list[str]) -> list[str]:
+    """任务级致命错误行（cookie/stoken 失效等），不产生「失败项：」但仍要算失败。"""
+    return [line for line in lines if line.startswith(TASK_ERROR_MARKERS)]
+
+
 def section_failures(section: dict[str, Any]) -> list[str]:
-    """账号下所有失败项，按「崩溃 → 游戏 → 云游戏 → 米游币」顺序。"""
+    """账号下所有失败项，按「崩溃 → 任务错误 → 游戏 → 云游戏 → 米游币」顺序。"""
     items: list[str] = []
     if section.get("crash"):
         items.append(f"执行异常：{section['crash']}")
+    items.extend(section.get("task_errors") or [])
     items.extend(section["game"]["failed_items"])
     items.extend(section["cloud_game"]["failed_items"])
     items.extend(section["bbs"]["failed_items"])
@@ -516,7 +539,10 @@ def account_headline(section: dict[str, Any]) -> str:
     if cloud["present"] and cloud["success"] + cloud["failed"] + cloud["skipped"]:
         parts.append(f"云游戏 {cloud['success']}/{cloud['success'] + cloud['failed'] + cloud['skipped']}")
     bbs = section["bbs"]
-    if bbs["present"]:
+    if section.get("task_errors"):
+        # 状态都没拿到，写「米游币 +0」会让人以为只是今天没收益
+        parts.append("米游币任务失败")
+    elif bbs["present"]:
         gained = bbs["gained_points"]
         text = f"米游币 +{gained}"
         if bbs["total_points"]:
@@ -613,6 +639,7 @@ RESULT_MARKERS = (
     "今日任务已完成",
     "配置 enable=false",
     "没有配置账号",
+    *TASK_ERROR_MARKERS,
 )
 
 
@@ -792,6 +819,7 @@ def build_account_summary(label: str, lines: list[str], success: bool) -> dict[s
     return {
         "label": label,
         "crash": _crash_reason(lines),
+        "task_errors": task_error_items(lines),
         "game": game,
         "cloud_game": cloud_game,
         "bbs": {
@@ -866,7 +894,7 @@ def is_task_success(lines: list[str]) -> bool:
         if line.startswith(("游戏社区签到汇总：", "游戏签到汇总：", "云游戏签到汇总：", "米游币任务汇总：")):
             if number_after(line, "失败") > 0:
                 return False
-        elif line in {"任务状态获取失败，请检查 cookie/stoken", "获取帖子列表失败，无法执行看帖/点赞/分享"}:
+        elif line.startswith(TASK_ERROR_MARKERS):
             return False
         elif line.startswith(("配置 enable=false", "没有配置账号")):
             return False

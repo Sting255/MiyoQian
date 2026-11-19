@@ -4,16 +4,22 @@
 from __future__ import annotations
 
 import copy
+from collections import Counter
+import uuid
 import pathlib
 import random
 from typing import Any
 
 import yaml
+from loguru import logger
 
 from ..constants import BBS_FORUMS, GAMES
 from . import crypto
 
-SENSITIVE_ACCOUNT_FIELDS = ("cookie", "stuid", "stoken", "mid")
+# 落 credentials.yaml、并从 config.yaml 剥离的账号字段。
+# ltoken/cookie_token 是扫码登录返回的凭证（虽然已经拼进 cookie，仍是密码学意义上的秘密），
+# 不在这里列出来的话会明文留在 config.yaml 里，还会经由 /api/config 回到浏览器。
+SENSITIVE_ACCOUNT_FIELDS = ("cookie", "stuid", "stoken", "mid", "ltoken", "cookie_token")
 SUPPORTED_CLOUD_GAME_KEYS = ("genshin", "zzz")
 SUPPORTED_GAME_KEYS = tuple(GAMES)
 # 账号间等待的上限：24 小时。再长就会把后面的账号推到第二天的定时任务上。
@@ -314,6 +320,7 @@ def normalize_shop_exchange(config: dict[str, Any]) -> None:
     if not isinstance(raw_plans, list):
         raw_plans = []
     plans: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
     for raw in raw_plans:
         if not isinstance(raw, dict):
             continue
@@ -326,6 +333,10 @@ def normalize_shop_exchange(config: dict[str, Any]) -> None:
         except (TypeError, ValueError):
             exchange_at = 0
         plan = {
+            "plan_id": str(raw.get("plan_id") or uuid.uuid4().hex),
+            "plan_version": str(raw.get("plan_version") or uuid.uuid4().hex),
+            "account_uid": str(raw.get("account_uid") or "").strip(),
+            "needs_account_confirmation": not bool(str(raw.get("account_uid") or "").strip()),
             "enable": parse_bool(raw.get("enable", True)),
             "auto": parse_bool(raw.get("auto", True)),
             "account_index": account_index,
@@ -346,11 +357,30 @@ def normalize_shop_exchange(config: dict[str, Any]) -> None:
             "address_id": str(raw.get("address_id") or "").strip(),
             "last_result": str(raw.get("last_result") or ""),
             "last_attempt_key": str(raw.get("last_attempt_key") or ""),
+            "completion_token": str(raw.get("completion_token") or ""),
             "last_run": str(raw.get("last_run") or ""),
         }
+        if plan["needs_account_confirmation"]:
+            plan["enable"] = False
+        if plan["plan_id"] in seen_ids:
+            plan["plan_id"] = uuid.uuid4().hex
+            plan["plan_version"] = uuid.uuid4().hex
+        seen_ids.add(plan["plan_id"])
+        if plan["account_uid"]:
+            matches = [i for i, account in enumerate(config.get("accounts") or [])
+                       if str(account.get("stuid") or "").strip() == plan["account_uid"]]
+            plan["account_index"] = matches[0] if len(matches) == 1 else -1
         if plan["goods_id"]:
             plans.append(plan)
     shop["plans"] = plans
+
+
+def exchange_plan_signature(plan: dict[str, Any]) -> tuple[Any, ...]:
+    """执行相关配置的版本边界；下标、展示文案与执行结果不影响身份。"""
+    return tuple(plan.get(key) for key in (
+        "account_uid", "goods_id", "exchange_at", "enable", "auto", "device_fp",
+        "type", "game_biz", "uid", "region", "address_id",
+    ))
 
 
 def normalize_cloud_game_tokens(value: Any) -> dict[str, str]:
@@ -794,39 +824,56 @@ def save_credentials(path: pathlib.Path, config: dict[str, Any]) -> None:
 
 
 def merge_credentials(config: dict[str, Any], credentials: dict[str, Any]) -> None:
-    if not config.get("accounts") and credentials.get("accounts"):
-        config["accounts"] = [
-            {"name": str(account.get("name") or "")}
-            for account in credentials.get("accounts", [])
-            if isinstance(account, dict)
-        ]
+    # 账号列表是配置的权威来源；不能用残留凭证复活已删除的账号。
+    accounts = config.get("accounts") or []
     credential_list = [
         account
         for account in credentials.get("accounts", [])
         if isinstance(account, dict)
     ]
-    credential_accounts = {
-        str(account.get("name")): account
-        for account in credential_list
-        if account.get("name")
-    }
-    for index, account in enumerate(config.get("accounts", [])):
-        saved = credential_accounts.get(str(account.get("name")))
-        if saved is None and index < len(credential_list):
-            saved = credential_list[index]
+    uid_of = lambda account: str(account.get("stuid") or "").strip()
+    name_of = lambda account: str(account.get("name") or "")
+    config_uids = Counter(uid_of(account) for account in accounts)
+    saved_uids = Counter(uid_of(account) for account in credential_list)
+    config_names = Counter(name_of(account) for account in accounts)
+    saved_names = Counter(name_of(account) for account in credential_list)
+    by_uid = {uid_of(account): account for account in credential_list if uid_of(account)}
+    by_name = {name_of(account): account for account in credential_list if name_of(account)}
+    for index, account in enumerate(accounts, start=1):
+        uid, name = uid_of(account), name_of(account)
+        saved = None
+        if uid and config_uids[uid] == saved_uids[uid] == 1:
+            saved = by_uid[uid]
+        elif not uid and name and config_names[name] == saved_names[name] == 1:
+            # 仅兼容旧版未保留 UID 的配置，且不能与另一账号抢同一份凭证。
+            candidate = by_name[name]
+            candidate_uid = uid_of(candidate)
+            if candidate_uid and saved_uids[candidate_uid] == 1 and not config_uids[candidate_uid]:
+                saved = candidate
+        if saved is None and not account.get("cookie") and any(item.get("cookie") for item in credential_list):
+            logger.bind(component="config").warning(
+                "账号 {} 无法可靠匹配已保存凭证，未恢复登录状态，请重新登录", index
+            )
         for field in SENSITIVE_ACCOUNT_FIELDS:
             if saved and not account.get(field):
                 account[field] = str(saved.get(field) or "")
             else:
                 account.setdefault(field, "")
-        merge_account_cloud_game_credentials(account, saved)
+        cloud_saved = saved
+        if not uid and name and config_names[name] == saved_names[name] == 1:
+            candidate = by_name[name]
+            if not uid_of(candidate):
+                # 纯云游戏账号没有米游社 UID，只恢复唯一同名账号的云 token。
+                cloud_saved = candidate
+        merge_account_cloud_game_credentials(account, cloud_saved)
 
 
 def strip_credentials(config: dict[str, Any]) -> dict[str, Any]:
     public_config = copy.deepcopy(config)
     for account in public_config.get("accounts", []):
         for field in SENSITIVE_ACCOUNT_FIELDS:
-            account.pop(field, None)
+            if field != "stuid":  # 非秘密的稳定身份，账号重名/重排时仍能精确回填
+                account.pop(field, None)
         account.pop("cloud_games", None)
     return public_config
 

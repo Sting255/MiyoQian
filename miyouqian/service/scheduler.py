@@ -7,10 +7,12 @@ import json
 import pathlib
 import random
 import threading
+import time
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from ..core.config import account_key
+from .notifier import send_push
 
 
 LogFn = Callable[[str], None]
@@ -19,6 +21,10 @@ RunFn = Callable[[threading.Event], list[str]]
 # 每个账号每天最多试几次。到了上限就不再因为它触发补跑：死 cookie 的账号否则
 # 每次重启都会刷一遍验证码，越刷越像机器人。
 MAX_ACCOUNT_ATTEMPTS = 2
+
+# 调度线程里的异常会每 30 秒重试一次。这类错误只在日志里出现时用户永远看不到，
+# 所以推送出去；但同一条错误 30 分钟内最多推一次，避免把手机刷屏。
+ERROR_PUSH_INTERVAL_SECONDS = 30 * 60
 
 
 class DailyScheduler:
@@ -60,6 +66,8 @@ class DailyScheduler:
         self._unfinished_this_run: set[str] = set()
         self._schedule_signature = self._make_schedule_signature(self._schedule_config())
         self._log_next_run_on_recompute = False
+        # 最近一次推出去的调度错误（消息 + monotonic 时间），用于节流
+        self._last_error_notice: tuple[str, float] = ("", 0.0)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -152,6 +160,23 @@ class DailyScheduler:
                 "schedule": self._schedule_config(),
             }
 
+    def _notify_error(self, message: str) -> None:
+        """把调度线程里的异常推给用户（节流 + 绝不影响调度本身）。
+
+        这些错误以前只写日志：开了「仅在出错时推送」之后，用户会完全收不到
+        调度坏掉、补跑判断失败这类真正需要处理的问题。
+        """
+        now = time.monotonic()
+        last_message, last_at = self._last_error_notice
+        if message == last_message and now - last_at < ERROR_PUSH_INTERVAL_SECONDS:
+            return
+        self._last_error_notice = (message, now)
+        try:
+            send_push(self.config, "❌ 米游签调度异常", message, success=False)
+        except Exception:
+            # 推送失败不能把调度线程弄死
+            pass
+
     def _loop(self) -> None:
         try:
             if self._schedule_config().get("run_on_start", False):
@@ -168,6 +193,7 @@ class DailyScheduler:
             with self._lock:
                 self._last_error = f"启动补跑判断失败: {exc}"
             self.log(f"启动补跑判断失败，本次不补跑: {exc}")
+            self._notify_error(f"启动补跑判断失败: {exc}")
         while not self._stop.is_set():
             try:
                 self._loop_once()
@@ -178,6 +204,7 @@ class DailyScheduler:
                 with self._lock:
                     self._last_error = f"调度异常: {exc}"
                 self.log(f"调度异常，30 秒后重试: {exc}")
+                self._notify_error(f"调度异常: {exc}")
                 self._stop.wait(timeout=30)
 
     def _loop_once(self) -> None:
@@ -331,14 +358,16 @@ class DailyScheduler:
             date=today,
             started_at=now.isoformat(timespec="seconds"),
             finished=False,
+            # 不清掉的话，运行中的文件会显示上一轮的完成时间（今天 11:12 就是这样）
+            finished_at=None,
             accounts_done=done,
             accounts_attempts=attempts,
         )
 
     def _state_finished(self, ok: bool) -> None:
         changes: dict[str, Any] = {"finished": bool(ok)}
-        if ok:
-            changes["finished_at"] = datetime.now().isoformat(timespec="seconds")
+        # 没跑成的那轮不能留下完成时间：界面上会和本轮 started_at 自相矛盾
+        changes["finished_at"] = datetime.now().isoformat(timespec="seconds") if ok else None
         self._save_state(**changes)
 
     def _should_catch_up(self) -> bool:
@@ -362,6 +391,8 @@ class DailyScheduler:
 
         没有这层限制，一个死 cookie 账号会让每次重启都刷一遍验证码/登录。
         """
+        if self._state.get("date") != datetime.now().date().isoformat():
+            return False
         attempts = self._state.get("accounts_attempts") or {}
         done = set(self._state.get("accounts_done") or [])
         remaining = [

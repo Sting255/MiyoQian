@@ -2,7 +2,7 @@
 """收尾清理：死代码、兑换的 1034/IP 守卫、计划键冲突、debug 目录、凭证回传。
 
 关于兑换计划的键（2026-09-23 已按上游做法修正）：
-  - worker 的唯一键 = `账号:商品:开抢时间` —— 同一商品同一时间的**不同账号**各跑一条；
+  - 去重键 = `账号UID:商品:开抢时间`；worker 按稳定计划 ID + 版本管理；
   - 写进计划的 `last_attempt_key` 仍然只是 `商品:开抢时间`，格式不变，
     所以已保存的计划不会被误判成「没试过」而重复兑换。
   - exchange worker 的 join 收不回在跑的兑换：要跨层传 stop_event，收益小于风险，没做。
@@ -58,19 +58,19 @@ class AttemptKeyCollisionTest(unittest.TestCase):
 
     def test_same_account_same_goods_same_time_is_a_collision(self) -> None:
         plans = [
-            {"goods_id": "A", "exchange_at": PAST, "account_index": 0},
-            {"goods_id": "A", "exchange_at": PAST, "account_index": 0},
+            {"goods_id": "A", "exchange_at": PAST, "account_uid": "101"},
+            {"goods_id": "A", "exchange_at": PAST, "account_uid": "101"},
         ]
         self.assertEqual(
             ExchangeScheduler.duplicate_worker_keys(plans),
-            ["0:A:%d" % PAST],
+            ["101:A:%d" % PAST],
         )
 
     def test_different_accounts_are_not_a_collision(self) -> None:
         """两个账号抢同一商品同一秒是正常需求，两条都要跑（上游测试也这么要求）。"""
         plans = [
-            {"goods_id": "A", "exchange_at": PAST, "account_index": 0},
-            {"goods_id": "A", "exchange_at": PAST, "account_index": 1},
+            {"goods_id": "A", "exchange_at": PAST, "account_uid": "101"},
+            {"goods_id": "A", "exchange_at": PAST, "account_uid": "202"},
         ]
         self.assertEqual(ExchangeScheduler.duplicate_worker_keys(plans), [])
 
@@ -88,9 +88,9 @@ class AttemptKeyCollisionTest(unittest.TestCase):
         self.assertEqual(scheduler._attempt_key(plans[0], PAST), "A:%d" % PAST)
 
     def test_worker_key_carries_the_account(self) -> None:
-        plan = {"goods_id": "A", "exchange_at": PAST, "account_index": 7}
+        plan = {"goods_id": "A", "exchange_at": PAST, "account_index": 7, "account_uid": "707"}
         scheduler = self._scheduler([plan])
-        self.assertEqual(scheduler._worker_key(plan, PAST), "7:A:%d" % PAST)
+        self.assertEqual(scheduler._worker_key(plan, PAST), "707:A:%d" % PAST)
 
     def test_rebuild_logs_the_collision(self) -> None:
         plans = [
@@ -111,8 +111,8 @@ class AttemptKeyCollisionTest(unittest.TestCase):
     def test_two_accounts_get_two_workers(self) -> None:
         future = int(time.time()) + 3600
         plans = [
-            {"goods_id": "A", "exchange_at": future, "enable": True, "auto": True, "account_index": 0},
-            {"goods_id": "A", "exchange_at": future, "enable": True, "auto": True, "account_index": 1},
+            {"plan_id": "first", "account_uid": "101", "goods_id": "A", "exchange_at": future, "enable": True, "auto": True},
+            {"plan_id": "second", "account_uid": "202", "goods_id": "A", "exchange_at": future, "enable": True, "auto": True},
         ]
         config = base_config()
         config["shop_exchange"] = {"enable": True, "plans": plans}
@@ -204,10 +204,10 @@ class ExchangeIpGuardTest(unittest.TestCase):
         messages: list[str] = []
         worker = PlanWorker(
             index=0,
-            plan={"goods_id": "B"},
+            plan={"goods_id": "B", "plan_id": "p", "plan_version": "v1"},
             exchange_at=PAST,
             attempt_key="B:1",
-            run_fn=fired.append,
+            run_fn=lambda *identity: fired.append(identity),
             log_fn=messages.append,
             ip_check=lambda: False,
         )
@@ -220,16 +220,16 @@ class ExchangeIpGuardTest(unittest.TestCase):
         fired: list[int] = []
         worker = PlanWorker(
             index=0,
-            plan={"goods_id": "B"},
+            plan={"goods_id": "B", "plan_id": "p", "plan_version": "v1"},
             exchange_at=PAST,
             attempt_key="B:1",
-            run_fn=fired.append,
+            run_fn=lambda *identity: fired.append(identity),
             log_fn=lambda message: None,
             ip_check=lambda: None,
         )
         with mock.patch.object(es, "sync_server_time_offset", lambda log: 0.0):
             worker._loop()
-        self.assertEqual(fired, [0], "IP 判断不出时应当按 on_error=allow 继续")
+        self.assertEqual(fired, [("p", f"B:{PAST}", "v1")], "IP 判断不出时应当按 on_error=allow 继续")
 
 
 class DebugDirTest(unittest.TestCase):
@@ -257,9 +257,11 @@ class DebugDirTest(unittest.TestCase):
             captured.update(kwargs)
             return ("validate", "challenge")
 
+        folder = make_case_dir()
+        self.addCleanup(__import__("shutil").rmtree, folder, True)
         with mock.patch.object(captcha, "_local_matcher", lambda channel, emit: object()), \
              mock.patch.object(nine_mod, "solve", fake_solve):
-            captcha._solve_local({"provider": "local"}, {"storage": {"data_dir": "data"}}, "gt", "ch", None)
+            captcha._solve_local({"provider": "local"}, {"storage": {"data_dir": str(folder)}}, "gt", "ch", None)
 
         self.assertIn("debug_dir", captured)
         self.assertIn("captcha_debug", str(captured["debug_dir"]))
@@ -289,10 +291,12 @@ class UnwritableDebugDirTest(unittest.TestCase):
         self.assertIn("except Exception", window)
         self.assertIn("不影响识别", window)
 
-    def test_debug_dir_is_cleared_before_each_solve(self) -> None:
-        """reset_debug_dir 必须真的被调用，否则现场图会无限堆积。"""
-        source = pathlib.Path(captcha.__file__).read_text(encoding="utf-8")
-        self.assertIn("reset_debug_dir", source, "captcha 没有清理上一次的现场图")
+    def test_finished_debug_history_is_bounded(self) -> None:
+        """按完成的请求清理历史，不能每次求解都删掉上一轮现场。"""
+        self.assertGreater(captcha._DEBUG_KEEP_SESSIONS, 0)
+        self.assertLessEqual(captcha._DEBUG_KEEP_SESSIONS, 20)
+        self.assertGreater(captcha._DEBUG_MAX_AGE_SECONDS, 0)
+        self.assertLessEqual(captcha._DEBUG_MAX_AGE_SECONDS, 7 * 24 * 60 * 60)
 
 
 if __name__ == "__main__":

@@ -11,10 +11,11 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import unittest
 
-from miyouqian.service.web import WebApp, hash_password
+from miyouqian.service.web import WebApp, hash_password, public_config, restore_masked_secrets
 from tests.support import IsolatedConfigTest, base_config
 
 SECRET_COOKIE = "COOKIE-SECRET-VALUE"
@@ -129,6 +130,83 @@ class ConfigSecretsTest(IsolatedConfigTest):
         payload["features"]["bbs_tasks"] = True
         app.set_config(payload)
         self.assertEqual(app.config["accounts"][0]["cookie"], SECRET_COOKIE)
+
+    def test_replacing_or_clearing_uid_cannot_inherit_old_credentials(self) -> None:
+        for uid in ("200000002", ""):
+            with self.subTest(uid=uid):
+                app = self._app()
+                payload = app.get_config()
+                payload["accounts"][0]["stuid"] = uid
+                app.set_config(payload)
+                account = app.config["accounts"][0]
+                for field in ("cookie", "stoken", "mid", "ltoken", "cookie_token"):
+                    self.assertFalse(account.get(field), field)
+                self.assertFalse(account["cloud_games"]["tokens"]["genshin"])
+
+    def test_new_uid_with_explicit_cookie_does_not_mix_old_other_secrets(self) -> None:
+        app = self._app()
+        payload = app.get_config()
+        payload["accounts"][0].update(stuid="200000002", cookie="NEW-ACCOUNT-COOKIE")
+        app.set_config(payload)
+        account = app.config["accounts"][0]
+        self.assertEqual(account["cookie"], "NEW-ACCOUNT-COOKIE")
+        self.assertFalse(account["stoken"])
+        self.assertFalse(account["mid"])
+        self.assertFalse(account["cloud_games"]["tokens"]["genshin"])
+
+    def test_secret_restoration_requires_unique_uid_on_both_sides(self) -> None:
+        original = {"accounts": [{"name": "A", "stuid": "101", "cookie": "fake-a"}]}
+        for duplicate_old in (False, True):
+            with self.subTest(duplicate_old=duplicate_old):
+                old = copy.deepcopy(original)
+                new = public_config(original)
+                target = old if duplicate_old else new
+                target["accounts"].append(copy.deepcopy(target["accounts"][0]))
+                restore_masked_secrets(old, new)
+                self.assertTrue(all(not a["cookie"] for a in new["accounts"]))
+
+    def test_unique_uid_restoration_survives_reorder_and_whitespace(self) -> None:
+        old = {"accounts": [{"name": "A", "stuid": " 101 ", "cookie": "fake-a"},
+                            {"name": "B", "stuid": "202", "cookie": "fake-b"}]}
+        new = public_config(old)
+        new["accounts"].reverse()
+        new["accounts"][1]["stuid"] = "101"
+        restore_masked_secrets(old, new)
+        self.assertEqual([a["cookie"] for a in new["accounts"]], ["fake-b", "fake-a"])
+
+    def test_cloud_only_account_uses_unique_name_without_main_credentials(self) -> None:
+        old = {"accounts": [{"name": "cloud", "stuid": "", "cookie": "unbound-cookie",
+                             "cloud_games": {"tokens": {"genshin": "fake-cloud"}}}]}
+        new = public_config(old)
+        restore_masked_secrets(old, new)
+        account = new["accounts"][0]
+        self.assertFalse(account["cookie"])
+        self.assertEqual(account["cloud_games"]["tokens"]["genshin"], "fake-cloud")
+
+    def test_cloud_only_tokens_survive_save_and_reload(self) -> None:
+        config = base_config()
+        config["accounts"] = [{"name": "cloud", "stuid": "",
+                               "cloud_games": {"tokens": {"genshin": "fake-cloud"}}}]
+        self.write_config(config)
+        app = WebApp(self.config_path)
+        app.set_config(app.get_config())
+        account = WebApp(self.config_path).config["accounts"][0]
+        self.assertEqual(account["cloud_games"]["tokens"]["genshin"], "fake-cloud")
+        self.assertFalse(account["cookie"])
+
+    def test_cloud_name_fallback_rejects_ambiguous_or_new_nonempty_uid(self) -> None:
+        original = {"accounts": [{"name": "cloud", "stuid": "",
+                                  "cloud_games": {"tokens": {"genshin": "fake-cloud"}}}]}
+        for action in ("duplicate_old", "duplicate_new", "new_uid"):
+            with self.subTest(action=action):
+                old, new = copy.deepcopy(original), public_config(original)
+                if action == "new_uid":
+                    new["accounts"][0]["stuid"] = "101"
+                else:
+                    target = old if action == "duplicate_old" else new
+                    target["accounts"].append(copy.deepcopy(target["accounts"][0]))
+                restore_masked_secrets(old, new)
+                self.assertTrue(all(not a["cloud_games"]["tokens"]["genshin"] for a in new["accounts"]))
 
 
 if __name__ == "__main__":

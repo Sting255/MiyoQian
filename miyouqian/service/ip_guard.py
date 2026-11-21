@@ -4,8 +4,8 @@
 检测到公网出口 IP 不在中国大陆时暂停签到，等 IP 回到大陆再继续；
 等待超过上限仍未恢复就放弃本次，并按配置推送通知。
 
-同时探测国内直连链路与境外链路：分流模式（规则模式）的代理下，
-米游社作为境外服务走的是代理那条路，只看国内直连会漏判。
+同时探测国内链路与境外链路，避免只看单个查询域名漏掉出境结果。
+查询域名的路由并不能证明米游社请求的实际路由。
 """
 
 from __future__ import annotations
@@ -60,16 +60,16 @@ def ensure_mainland_ip(
 
         if verdict is True:
             if paused:
-                add(f"# ✅ 出口 IP 已回到中国大陆（{report.domestic.label}），继续签到")
+                add(f"# ✅ 出口 IP 已回到中国大陆（{report.location.label}），继续签到")
                 _notify(
                     config,
                     notify,
                     "米游签 · 出口 IP 已恢复，继续签到",
-                    f"当前出口：{report.domestic.label}",
+                    f"当前出口：{report.location.label}",
                     True,
                 )
             else:
-                add(f"# 🌐 出口 IP 检测通过：{report.domestic.label}（中国大陆）")
+                add(f"# 🌐 出口 IP 检测通过：{report.location.label}（中国大陆）")
             return True
 
         if verdict is False:
@@ -89,11 +89,18 @@ def ensure_mainland_ip(
 
         if not paused:
             paused = True
-            add(f"# 🚫 检测到境外出口（{reason}），已暂停签到")
+            if verdict is False:
+                add(f"# 🚫 检测到境外出口（{reason}），已暂停签到")
+                pause_title = "米游签 · 暂停签到（出口 IP 不在中国大陆）"
+                resume_hint = "关掉 VPN 后会自动继续"
+            else:
+                add(f"# 🚫 无法确认出口 IP 属地（{reason}），按配置暂停签到")
+                pause_title = "米游签 · 暂停签到（无法确认出口 IP 属地）"
+                resume_hint = "查询恢复且确认大陆出口后会自动继续"
             wait_hint = f"每 {format_duration(interval)}复查一次"
             wait_hint += f"，最多等 {format_duration(max_wait)}" if max_wait else "，不限时长"
-            add(f"# ⏳ {wait_hint}；关掉 VPN 后会自动继续")
-            _notify(config, notify, "米游签 · 暂停签到（出口 IP 不在中国大陆）", detail, False)
+            add(f"# ⏳ {wait_hint}；{resume_hint}")
+            _notify(config, notify, pause_title, detail, False)
 
         if max_wait and waited >= max_wait:
             add(f"# ⌛ 已等待 {format_duration(max_wait)}，出口 IP 仍未恢复，本次签到已放弃")

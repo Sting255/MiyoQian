@@ -26,8 +26,10 @@ from urllib.parse import parse_qs, unquote, urlparse
 import qrcode
 
 from ..auth.login import AigisRequired, CaptchaLogin, QRLogin, _QrRefreshed
+from ..auth import webcookie
 from ..core import captcha as captcha_mod
 from ..core import cookies, crypto
+from ..core import devicefp
 from ..core.config import (
     SENSITIVE_ACCOUNT_FIELDS,
     exchange_plan_signature,
@@ -260,8 +262,10 @@ class WebApp:
                 stop_event=stop_event,
                 # 补跑：跳过今天已经跑完的账号，由 runner 保证第一个实际执行的账号不等待
                 skip_accounts=self.scheduler.resume_skip_accounts(),
+                skip_exhausted_accounts=self.scheduler.resume_exhausted_accounts(),
                 on_account_done=self.scheduler.mark_account_done,
                 on_account_failed=self.scheduler.mark_account_failed,
+                on_account_unfinished=self.scheduler.mark_account_unfinished,
                 persist=lambda completed: self._persist_task_credentials(initial, completed),
             )
         except Exception as exc:
@@ -334,11 +338,11 @@ class WebApp:
         report = probe_links(domestic=guard.get("endpoints") or None)
         result = report.to_dict()
         if report.split:
-            summary = f"分流代理：{report.reason}"
+            summary = f"两条探测链路出口不同：{report.reason}"
         elif report.blocked:
             summary = f"境外出口：{report.reason}"
         elif report.mainland is True:
-            summary = f"中国大陆：{report.domestic.label}"
+            summary = f"中国大陆：{report.location.label}"
         else:
             summary = f"属地未知：{report.reason}"
         self.log(f"出口 IP 检测：{summary}", "ip")
@@ -449,6 +453,8 @@ class WebApp:
                 device["model"] = str(chosen.get("model") or device.get("model") or "")
             device["id"] = crypto.device_id()
             device["fp"] = crypto.device_fp()
+            # 新设备的 fp 还没在服务器登记，下次登录前会重新申请
+            device["fp_source"] = ""
             result = {
                 "id": str(device["id"]),
                 "fp": str(device["fp"]),
@@ -489,17 +495,15 @@ class WebApp:
 
     def ensure_shop_device_fp(self) -> dict[str, Any]:
         self.log("开始预获取商品兑换 device_fp", "exchange")
-        with self.lock:
-            config = copy.deepcopy(self.config)
         try:
-            with shop_client(timeout=20.0) as client:
-                device_fp = ShopExchange(client, config).fetch_device_fp()
+            # 已有服务器签发的 fp 就沿用，不随意换：登录会话和 fp 是绑在一起的
+            device = self._login_device()
+            if not devicefp.has_server_fp(device):
+                raise ValueError("服务器未签发 device_fp")
+            device_fp = str(device["fp"])
         except Exception as exc:
             self.log(f"商品兑换 device_fp 获取失败: {exc}", "exchange")
             raise
-        with self.lock:
-            self.config.setdefault("device", {})["fp"] = device_fp
-            save_config(self.config_path, self.config)
         self.log("已预获取商品兑换 device_fp", "exchange")
         return {"device_fp": device_fp}
 
@@ -722,6 +726,32 @@ class WebApp:
         thread.start()
         self.log(f"账号 {account_name} 开始扫码登录", "auth")
 
+    def _login_device(self, force: bool = False) -> dict[str, Any]:
+        """返回登录用的设备档案；还没有服务器签发的 device_fp 就先申请并保存。
+
+        随机生成的 fp 没在服务器登记，用它登录拿到的 stoken 换不到 ltoken（retcode=1002）。
+        申请失败时沿用现有 fp 继续，并在日志里说明原因。
+        """
+        with self.lock:
+            device = dict(self.config["device"])
+        if not force and devicefp.has_server_fp(device):
+            return device
+        with ApiClient(timeout=15.0, jitter_range=None) as client:
+            ok, reason = devicefp.ensure_server_fp(client, device, force=force)
+        if not ok:
+            self.log(f"向服务器申请设备指纹失败，沿用本地指纹: {reason}", "auth")
+            return device
+        with self.lock:
+            current = self.config.setdefault("device", {})
+            if str(current.get("id") or "") != str(device.get("id") or ""):
+                # 申请期间设备被更换了，这枚 fp 不属于新设备
+                return dict(current)
+            for key in ("fp", "fp_source", "fp_time"):
+                current[key] = device[key]
+            save_config(self.config_path, self.config)
+        self.log("已向服务器申请并保存设备指纹", "auth")
+        return device
+
     def send_login_captcha(
         self,
         account_index: int,
@@ -735,7 +765,7 @@ class WebApp:
         with self.lock:
             if self.login_state.get("running"):
                 raise RuntimeError("扫码登录正在进行")
-            device = dict(self.config["device"])
+        device = self._login_device()
         with ApiClient() as client:
             login = CaptchaLogin(client, str(device["id"]), str(device["fp"]),
                                  str(device.get("model") or "Mi 14"),
@@ -772,15 +802,21 @@ class WebApp:
             self.login_state = {"running": True, "status": "exchanging", "account_index": account_index,
                                 "draft_id": str(account_snapshot.get("_draft_id") or "") if draft else "",
                                 "draft": draft, "message": "正在获取完整凭证", "qr": ""}
+        stage = "校验短信验证码"
         try:
             with ApiClient() as client:
                 login = CaptchaLogin(client, str(device["id"]), str(device["fp"]),
                                      str(device.get("model") or "Mi 14"),
                                      str(device.get("name") or "Mihoyo Capture"))
                 token_data = login.login_by_mobile_captcha(phone, captcha, action_type, aigis)
+                stage = "换取完整登录凭证"
                 account_data = self._complete_login_data(login, token_data)
+            stage = "保存登录凭证"
             account = self._save_login_account(account_index, account_snapshot, account_data, draft,
                                                generation=generation, cancel=cancel, target=target)
+        except Exception as exc:
+            self.log(f"账号 {account_name} 验证码登录失败（{stage}）: {exc}", "auth")
+            raise
         finally:
             with self.lock:
                 if self._login_generation == generation:
@@ -814,14 +850,16 @@ class WebApp:
         return account_snapshot, account_name, target
 
     def _complete_login_data(self, login: QRLogin | CaptchaLogin, token_data: dict[str, str]) -> dict[str, str]:
-        account_data = {**token_data, **login.get_additional_tokens(token_data["stoken"], token_data["mid"])}
-        account_data["cookie"] = cookies.build_cookie(
-            account_data["stuid"],
-            account_data["mid"],
-            account_data["ltoken"],
-            account_data["cookie_token"],
-        )
-        return account_data
+        # passport 的 stoken 换 ltoken/cookie_token 已不可用（1002/-464），改用 stoken 确认网页登录拿网页 Cookie
+        with self.lock:
+            device = dict(self.config["device"])
+        web = webcookie.fetch_web_cookies(token_data["stuid"], token_data["stoken"], token_data["mid"], device)
+        return {
+            **token_data,
+            "ltoken": web["ltoken_v2"],
+            "cookie_token": web["cookie_token_v2"],
+            "cookie": webcookie.build_cookie_header(web, token_data["stuid"], token_data["mid"]),
+        }
 
     def _save_login_account(
         self,
@@ -881,8 +919,8 @@ class WebApp:
         try:
             if cancel.is_set():
                 return
+            device = self._login_device()
             with self.lock:
-                device = dict(self.config["device"])
                 account_name = display_account_name(account_snapshot)
             with ApiClient() as client:
                 login = QRLogin(client, str(device["id"]), str(device["fp"]),

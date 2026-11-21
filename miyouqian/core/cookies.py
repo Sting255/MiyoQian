@@ -46,8 +46,10 @@ def build_cookie(uid: str, mid: str, ltoken: str, cookie_token: str) -> str:
         f"account_id_v2={uid}",
         f"account_mid_v2={mid}",
         f"cookie_token={cookie_token}",
+        f"cookie_token_v2={cookie_token}",
         f"ltmid_v2={mid}",
         f"ltoken={ltoken}",
+        f"ltoken_v2={ltoken}",
         f"ltuid={uid}",
         f"ltuid_v2={uid}",
         f"login_uid={uid}",
@@ -60,5 +62,5 @@ def replace_or_append_cookie_value(cookie: str, key: str, value: str) -> str:
         return f"{key}={value}"
     pattern = rf"((?:^|;\s*){re.escape(key)}=)([^;]*)"
     if re.search(pattern, cookie):
-        return re.sub(pattern, rf"\g<1>{value}", cookie, count=1)
+        return re.sub(pattern, lambda match: match.group(1) + value, cookie)
     return f"{cookie.rstrip('; ')}; {key}={value}"

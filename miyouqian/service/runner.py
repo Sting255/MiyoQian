@@ -85,11 +85,15 @@ def run_tasks(
     on_account_done: Callable[[str], None] | None = None,
     on_account_failed: Callable[[str], None] | None = None,
     persist: Callable[[dict[str, Any]], None] | None = None,
+    on_account_unfinished: Callable[[str], None] | None = None,
+    skip_exhausted_accounts: set[str] | None = None,
 ) -> list[str]:
     """跑一轮签到任务。
 
-    `skip_accounts` 里的账号今天已经跑过（断点续跑），直接跳过；
-    `on_account_done` 在每个账号处理完后回调一次，供调用方落盘进度。
+    `skip_accounts` 里的账号在本次断点续跑中跳过；其中达到重试上限的账号
+    由 `skip_exhausted_accounts` 单独标明，不能记成已完成。
+    只有任务成功的账号才回调 `on_account_done`；业务失败回调 `on_account_failed`，
+    没有实际执行的账号回调 `on_account_unfinished`，不消耗重试次数。
 
     结束后（无论成功、报错还是被中断）都会释放常驻的视觉识别模型，
     把约 139MB 内存还给系统；下次遇到验证码时会自动重新加载（约 0.5 秒）。
@@ -109,6 +113,8 @@ def run_tasks(
             on_account_done,
             on_account_failed,
             persist,
+            on_account_unfinished,
+            skip_exhausted_accounts,
         )
     finally:
         captcha.release_matcher()
@@ -128,6 +134,8 @@ def _run_tasks(
     on_account_done: Callable[[str], None] | None = None,
     on_account_failed: Callable[[str], None] | None = None,
     persist: Callable[[dict[str, Any]], None] | None = None,
+    on_account_unfinished: Callable[[str], None] | None = None,
+    skip_exhausted_accounts: set[str] | None = None,
 ) -> list[str]:
     output: list[str] = []
 
@@ -154,7 +162,7 @@ def _run_tasks(
     account_push = bool((config.get("push") or {}).get("per_account", False))
     try:
         executed = 0
-        # 本轮有账号没签成（崩溃，或被出口 IP 门禁挡下）：调用方据此判定整轮没跑完
+        # 本轮有账号没签成（业务失败、崩溃、IP 门禁或重试上限）：整轮不能算完成
         unfinished = False
         for index, account in enumerate(accounts, start=1):
             if stopped():
@@ -164,6 +172,12 @@ def _run_tasks(
             # 进度键带上配置序号：账号名会被截断成 10 个字符，同名账号不能互相顶掉。
             # 键对不上只会重跑，绝不会误跳过（旧格式的纯名字进度一律不匹配）。
             key = account_key(index, name)
+            if skip_exhausted_accounts and key in skip_exhausted_accounts:
+                add(f"# 账号 {name} 今天自动尝试次数已达上限，跳过（断点续跑）")
+                unfinished = True
+                if on_account_unfinished:
+                    on_account_unfinished(key)
+                continue
             if skip_accounts and key in skip_accounts:
                 add(f"# 账号 {name} 今天已完成，跳过（断点续跑）")
                 continue
@@ -178,6 +192,8 @@ def _run_tasks(
                 # 但不记失败次数：这条路径连 ApiClient 都没建，没有登录/验证码成本，
                 # 不该消耗「每账号每天 2 次」的预算（代理自启常会把两次启动都用掉）。
                 unfinished = True
+                if on_account_unfinished:
+                    on_account_unfinished(key)
                 continue
             # 账号间加随机间隔，降低多账号被风控的概率；等待期间可以随时停止。
             # 具体等多久由配置段 account_gap 决定（网页「每日调度」里可改，0 = 不等）。
@@ -199,7 +215,6 @@ def _run_tasks(
                         break
             add(f"# 账号 {index}/{len(accounts)}: {name}")
             start = len(output)
-            crashed = False
             try:
                 # 账号可以拥有独立的任务配置，未单独配置时跟随全局配置。
                 account_tasks = account_config(config, account)
@@ -237,20 +252,20 @@ def _run_tasks(
             except Exception as exc:
                 # 单个账号的接口/网络异常（超时、5xx、429…）不能吃掉当天剩下的账号；
                 # 记成失败让推送说实话，然后继续跑下一个账号。
-                crashed = True
                 add(f"{ACCOUNT_CRASH_MARKER}（{name}）：{exc}")
             if account_push:
                 _push_account_result(config, add, account, output[start:])
-            # 崩掉的账号不算完成：留给下次启动补跑再试一次，别把失败记成「今天已跑」。
-            if crashed:
+            if stopped():
+                add("# ⏹ 已停止，剩余账号不再执行")
+                break
+            # 登录失效、验证码失败等通常以结果行返回，不会抛异常。
+            # 进度和推送必须使用同一套成功判定，否则失败账号会在补跑时被永久跳过。
+            if not is_task_success(output[start:]):
                 unfinished = True
                 if on_account_failed:
                     on_account_failed(key)
             elif on_account_done:
                 on_account_done(key)
-            if stopped():
-                add("# ⏹ 已停止，剩余账号不再执行")
-                break
         if skip_accounts and not executed and not stopped() and not unfinished:
             add("# 今天所有账号均已完成，无需补跑")
     finally:

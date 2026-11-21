@@ -186,7 +186,9 @@ class LoginRobustnessTest(unittest.TestCase):
 
     def test_refresh_cookie_token_handles_null_data(self) -> None:
         account = {"cookie": "x=1", "stuid": "1", "stoken": "s", "mid": "m"}
-        result = login_mod.refresh_cookie_token(self.FakeClient({"retcode": 0, "data": None}), account)
+        with mock.patch.object(login_mod.webcookie, "fetch_web_cookies",
+                               side_effect=login_mod.webcookie.WebCookieError("网页登录未下发 cookie_token_v2")):
+            result = login_mod.refresh_cookie_token(self.FakeClient({"retcode": 0, "data": None}), account)
         self.assertFalse(result)
         self.assertEqual(account["cookie"], "x=1")
 

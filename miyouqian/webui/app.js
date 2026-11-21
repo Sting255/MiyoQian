@@ -2788,7 +2788,6 @@ async function showLoginMethods(accountIndex) {
     throw new Error("请先添加账号");
   }
   clearLoginCountdown();
-  lastLoginStatus = "";
   activeLoginIndex = accountIndex;
   localLoginPanel = { account_index: accountIndex, mode: "methods" };
   renderLoginSlot({ running: false, status: "idle" }, { forceLocal: true });
@@ -3150,7 +3149,6 @@ async function startLogin(accountIndex) {
   if (!account) {
     throw new Error("请先添加账号");
   }
-  lastLoginStatus = "";
   activeLoginIndex = accountIndex;
   clearLoginCountdown();
   localLoginPanel = null;
@@ -3170,6 +3168,9 @@ async function startLogin(accountIndex) {
         account: stripClientAccount(account),
       }),
     });
+    // Only treat status as a fresh attempt after the server accepted this login.
+    // Before the POST completes, polling may still return the previous account's success.
+    lastLoginStatus = "starting";
     showToast("登录流程已启动");
     await refreshStatus();
   } catch (error) {
@@ -3268,20 +3269,24 @@ async function checkIpNow() {
   const data = await api("/api/ip/check", { method: "POST", body: "{}" });
   const domestic = data.domestic || {};
   const overseas = data.overseas || {};
+  const current = data.blocked
+    ? [overseas, domestic].find((location) => location.ip && location.mainland === false) || data
+    : overseas.ip ? overseas : domestic.ip ? domestic : data;
   const lines = [];
   if (data.split) {
-    lines.push(`⚠️ 检测到分流代理：国内直连走 ${domestic.ip || "?"}${
+    lines.push(`两条探测链路出口不同：国内查询 ${domestic.ip || "?"}${
       domestic.region ? `（${domestic.region}）` : ""
-    }，境外流量走 ${overseas.ip || "?"}${overseas.region ? `（${overseas.region}）` : ""}`);
-    lines.push("米游社是境外服务，走的是代理那条路，会触发异地风控，签到已暂停。");
-  } else if (data.blocked) {
-    lines.push(`🚫 出口在境外：${data.ip || "?"}${data.region ? ` · ${data.region}` : ""}`);
-    lines.push("签到已暂停，关掉 VPN / 代理后会自动继续。");
+    }，境外查询 ${overseas.ip || "?"}${overseas.region ? `（${overseas.region}）` : ""}`);
+  }
+  if (data.blocked) {
+    lines.push(`🚫 检测到境外出口：${current.ip || "?"}${current.region ? ` · ${current.region}` : ""}`);
+    lines.push("IP 防护开启时，签到会等待出口恢复中国大陆。");
   } else if (data.mainland === true) {
-    lines.push(`✅ 出口在中国大陆：${domestic.ip || "?"}${domestic.region ? ` · ${domestic.region}` : ""}`);
+    lines.push(`✅ 出口在中国大陆：${current.ip || "?"}${current.region ? ` · ${current.region}` : ""}`);
   } else {
     lines.push(`⚠️ 属地无法判断：${data.reason || data.error || "查询失败"}`);
   }
+  if (!domestic.ip && overseas.ip) lines.push("国内查询接口暂不可用，当前展示备用查询结果。");
   if (data.proxy) lines.push(`系统代理：${data.proxy}`);
   const text = lines.join(" ");
   if (node) node.textContent = text;

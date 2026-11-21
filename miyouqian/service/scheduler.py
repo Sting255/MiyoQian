@@ -62,7 +62,7 @@ class DailyScheduler:
         # 本次执行是否「启动补跑」，以及补跑要跳过的账号（在 run_now 里按当时的状态文件快照）
         self._resume = False
         self._resume_skip: set[str] = set()
-        # 本轮没跑成的账号（崩溃 / 被出口 IP 门禁挡下），本轮结束时据它判定「今天还没了结」
+        # 本轮没跑成的账号（业务失败 / 崩溃 / IP 门禁 / 重试上限），据此判定当天未完成
         self._unfinished_this_run: set[str] = set()
         self._schedule_signature = self._make_schedule_signature(self._schedule_config())
         self._log_next_run_on_recompute = False
@@ -109,9 +109,14 @@ class DailyScheduler:
         return True
 
     def resume_skip_accounts(self) -> set[str]:
-        """本次执行要跳过的账号（只有补跑时才非空）。"""
+        """本次补跑跳过已完成及达到当天重试上限的账号。"""
         with self._lock:
-            return set(self._resume_skip) if self._resume else set()
+            return set(self._resume_skip) | self._exhausted_accounts() if self._resume else set()
+
+    def resume_exhausted_accounts(self) -> set[str]:
+        """补跑中因重试上限跳过的账号；它们仍未完成，不能写入 accounts_done。"""
+        with self._lock:
+            return self._exhausted_accounts() if self._resume else set()
 
     def mark_account_done(self, name: str) -> None:
         """记下一个账号已完成。name 是 runner 给的进度键（`序号|账号名`），这里只存不解析。
@@ -127,8 +132,14 @@ class DailyScheduler:
         done.append(name)
         self._save_state(accounts_done=done)
 
+    def mark_account_unfinished(self, name: str) -> None:
+        """账号没有实际执行：保留未完成状态，不消耗当天重试次数。"""
+        key = str(name or "").strip()
+        if key and self._state.get("date") == datetime.now().date().isoformat():
+            self._unfinished_this_run.add(key)
+
     def mark_account_failed(self, name: str) -> None:
-        """记一次失败尝试（崩溃或 IP 门禁挡下），本轮因此不算跑完。
+        """记一次失败尝试（业务失败或崩溃），本轮因此不算跑完。
 
         次数落盘：同一账号当天到 MAX_ACCOUNT_ATTEMPTS 就不再触发补跑。
         """
@@ -137,7 +148,7 @@ class DailyScheduler:
             return
         attempts = dict(self._state.get("accounts_attempts") or {})
         attempts[key] = self._attempts_of(attempts, key) + 1
-        self._unfinished_this_run.add(key)
+        self.mark_account_unfinished(key)
         self._save_state(accounts_attempts=attempts)
 
     def stop_run(self) -> bool:
@@ -274,6 +285,8 @@ class DailyScheduler:
         self.log("开始执行签到任务")
         self._unfinished_this_run = set()
         self._state_started()
+        if self._resume:
+            self._unfinished_this_run.update(self._exhausted_accounts())
         ok = False
         try:
             for line in self.run_fn(self._stop_run):
@@ -286,8 +299,8 @@ class DailyScheduler:
                 ok = True
                 self.log("签到任务已手动停止")
             elif self._unfinished_this_run:
-                # 有账号没签成：今天还没了结，下次启动继续补（受尝试上限约束）
-                self.log("签到任务完成，但有账号没签成，下次启动会再补一次")
+                # 是否启动补跑由 catch_up 和重试上限决定，这里只保留真实完成状态。
+                self.log("签到任务完成，但有账号没签成，已保留未完成状态")
             else:
                 ok = True
                 self.log("签到任务执行完成")
@@ -403,6 +416,21 @@ class DailyScheduler:
         return bool(remaining) and all(
             self._attempts_of(attempts, key) >= MAX_ACCOUNT_ATTEMPTS for key in remaining
         )
+
+    def _exhausted_accounts(self) -> set[str]:
+        """今天尚未完成、但自动重试次数已用满的账号。"""
+        if self._state.get("date") != datetime.now().date().isoformat():
+            return set()
+        attempts = self._state.get("accounts_attempts") or {}
+        done = set(self._state.get("accounts_done") or [])
+        keys = {
+            account_key(index, (account or {}).get("name"))
+            for index, account in enumerate(self.config.get("accounts") or [], start=1)
+        }
+        return {
+            key for key in keys - done
+            if self._attempts_of(attempts, key) >= MAX_ACCOUNT_ATTEMPTS
+        }
 
     @staticmethod
     def _attempts_of(attempts: dict[str, Any], key: str) -> int:

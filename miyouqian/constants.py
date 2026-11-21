@@ -10,6 +10,8 @@ BBS_WEB_SALT = "G1ktdwFL4IyGkHuuWSmz0wUe9Db9scyK"
 BBS_X6_SALT = "t0qEgfub6cvueAPgR5m9aQWWVciEer7v"
 PASSPORT_X4_SALT = "xV8v4Qu54lUKrEYFZkJhB8cuOh9Asafs"
 PASSPORT_APP_SALT = "dDIQHbKOdaPaLuvQKVzUzqdeCaxjtaPV"
+# account/auth 的 stoken 换证使用 Passport 登录签名，不是带 b/q 的社区签名。
+PASSPORT_AUTH_SALT = "IZPgfb0dRPtBeLuFkdDznSZ6f4wWt6y2"
 
 PASSPORT_APP_ID = "bll8iq97cem8"
 QRCODE_APP_APP_ID = "ddxf5dufpuyo"

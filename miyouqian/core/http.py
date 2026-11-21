@@ -6,12 +6,22 @@ from __future__ import annotations
 import random
 import time
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
 
 class ApiError(RuntimeError):
     """接口或网络错误。"""
+
+
+def _safe_url(url: str) -> str:
+    """错误只保留接口位置，不能把查询参数里的登录凭证回传到日志或网页。"""
+    try:
+        parts = urlsplit(url)
+        return urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
+    except ValueError:
+        return "[无效接口地址]"
 
 
 # 签到路径专用的「模拟真人」抖动范围（秒）：每次请求前随机等待，
@@ -76,11 +86,15 @@ class ApiClient:
             response.raise_for_status()
             data = response.json()
         except httpx.HTTPError as exc:
-            raise ApiError(f"网络请求失败: {url} ({exc})") from exc
-        except ValueError as exc:
-            raise ApiError(f"接口返回不是 JSON: {url}") from exc
+            detail = type(exc).__name__
+            if isinstance(exc, httpx.HTTPStatusError):
+                detail += f", HTTP {exc.response.status_code}"
+            # httpx 的异常原文通常包含合并 params 后的完整 URL。
+            raise ApiError(f"网络请求失败: {_safe_url(url)} ({detail})") from None
+        except ValueError:
+            raise ApiError(f"接口返回不是 JSON: {_safe_url(url)}") from None
         if not isinstance(data, dict):
-            raise ApiError(f"接口返回格式异常: {url}")
+            raise ApiError(f"接口返回格式异常: {_safe_url(url)}")
         return data, response.headers
 
     def close(self) -> None:

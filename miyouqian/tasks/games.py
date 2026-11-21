@@ -29,11 +29,19 @@ class GameCheckin:
         self.account = account
         self.device = config["device"]
         self.emit = emit
+        self._refresh_attempted = False
+        self._refresh_failure = ""
 
     def run(self, only_games: list[str] | None = None) -> list[str]:
         enabled = self.config.get("games", {}).get("enabled", [])
         if only_games:
             enabled = [game for game in enabled if game in only_games]
+        # 2026-11-20 起签到接口会拒绝过期的网页凭证，而查角色接口可能照常放行，
+        # 等 -100 再刷新来不及：每轮签到前先用 stoken 换一套新的网页 Cookie。
+        if enabled and self.account.get("stoken") and not self._refresh_attempted:
+            errors: list[str] = []
+            if not refresh_cookie_token(self.client, self.account, device=self.device, on_error=errors.append):
+                self._refresh_failure = "；".join(errors)
         messages: list[str] = []
         success: list[str] = []
         failed: list[str] = []
@@ -172,12 +180,16 @@ class GameCheckin:
             headers=self._headers(game),
         )
         retcode = data.get("retcode")
-        if retcode == -100 and not retried:
-            if refresh_cookie_token(self.client, self.account):
+        if retcode in LOGIN_FAILED_RETCODES and not retried and not self._refresh_attempted:
+            self._refresh_attempted = True
+            refresh_errors: list[str] = []
+            if refresh_cookie_token(self.client, self.account, device=self.device, on_error=refresh_errors.append):
                 return self._get_roles(game, retried=True)
+            self._refresh_failure = "；".join(refresh_errors)
         if retcode in LOGIN_FAILED_RETCODES:
             detail = str(data.get("message") or "登录失效")
-            return [], f"{detail}({retcode})，请重新扫码登录"
+            refresh_detail = f"；自动刷新失败：{self._refresh_failure}" if self._refresh_failure else ""
+            return [], f"{detail}({retcode})，请重新扫码登录{refresh_detail}"
         if retcode != 0:
             detail = str(data.get("message") or "接口返回异常")
             return [], f"{detail}({retcode})"

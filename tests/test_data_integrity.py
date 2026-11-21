@@ -110,7 +110,10 @@ class TaskPersistenceTest(IsolatedConfigTest):
                             entered.set()
                             if not release.wait(5):
                                 raise RuntimeError("test barrier timeout")
-                            self.target["cookie"] = "refreshed-cookie"
+                            self.target["cookie"] = (
+                                "refreshed-cookie; ltoken=NEW-LTOKEN; ltoken_v2=NEW-LTOKEN; "
+                                "cookie_token=NEW-COOKIE; cookie_token_v2=NEW-COOKIE"
+                            )
                         return []
 
                 def run():
@@ -145,7 +148,18 @@ class TaskPersistenceTest(IsolatedConfigTest):
                 if action == "delete":
                     self.assertNotIn("101", by_uid)
                 else:
-                    self.assertEqual(by_uid["101"]["cookie"], "new-login" if action == "relogin" else "refreshed-cookie")
+                    if action == "relogin":
+                        self.assertEqual(by_uid["101"]["cookie"], "new-login")
+                    else:
+                        saved_cookie = by_uid["101"]["cookie"]
+                        for token in (
+                            "ltoken=NEW-LTOKEN",
+                            "ltoken_v2=NEW-LTOKEN",
+                            "cookie_token=NEW-COOKIE",
+                            "cookie_token_v2=NEW-COOKIE",
+                        ):
+                            with self.subTest(action=action, token=token):
+                                self.assertIn(token, saved_cookie)
                 self.assertEqual(by_uid["202"]["cookie"], "cookie-202")
 
 

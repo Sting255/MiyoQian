@@ -44,6 +44,18 @@ def ds_x4(query: str = "", body: str = "") -> str:
     return f"{t},{r},{sign}"
 
 
+def ds_passport_auth() -> str:
+    """国服 account/auth 换证签名；凭证仅放在 Cookie 中。
+
+    与 genshin.py 的 cn_fetch_cookie_token_with_stoken_v2 协议一致：
+    app_login 盐、六位字母随机数，签名不含 b/q。
+    """
+    t = str(int(time.time()))
+    r = "".join(random.choices(string.ascii_letters, k=6))
+    sign = md5(f"salt={c.PASSPORT_AUTH_SALT}&t={t}&r={r}")
+    return f"{t},{r},{sign}"
+
+
 def device_id(seed: str | None = None) -> str:
     if seed:
         return str(uuid.uuid3(uuid.NAMESPACE_URL, seed)).upper()

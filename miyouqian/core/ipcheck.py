@@ -4,9 +4,9 @@
 用于判断本机是不是开着 VPN / 代理从境外出去的：只要公网出口 IP 不在中国大陆，
 签到就先停住，等 IP 回到大陆再继续，避免异地登录触发风控。
 
-注意：分流模式（规则模式）的代理下，国内直连、国外走代理，两边看到的出口 IP
-是不一样的。只查国内接口会以为一切正常，但米游社是境外服务、走的是代理那条路，
-所以必须**分别探测两条链路**，任意一条出境都要拦。
+注意：不同查询域名可能被代理规则分流，两边看到的出口 IP 可能不一样。
+分别探测两条链路，任意一条出境都要拦；出口不同本身不等于已经出境，
+也不能据此断言米游社请求实际走了哪条路。
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import httpx
 
 # 国内链路探测接口：这些站点的流量通常走直连（代理规则里多是中国大陆直连）
 DOMESTIC_ENDPOINTS: tuple[str, ...] = (
-    "https://myip.ipip.net/simple",
+    "https://myip.ipip.net",
     "https://ip.3322.net",
     "https://www.taobao.com/help/getip.php",
 )
@@ -113,7 +113,7 @@ class LinkReport:
 
     @property
     def split(self) -> bool:
-        """国内直连、国外走代理的分流模式：两边 IP 不同。"""
+        """两条探测链路的 IP 不同；这本身不代表已出境或正在使用代理。"""
         return bool(
             self.domestic.ip and self.overseas.ip and self.domestic.ip != self.overseas.ip
         )
@@ -130,8 +130,8 @@ class LinkReport:
     def mainland(self) -> bool | None:
         """整体判定，语义与 IpLocation.mainland 一致。
 
-        以境外链路为准：米游社是境外服务，走的是和境外链路同一条路。
-        境外链路查不通时再退回看国内直连。
+        保留优先看境外探测链路的策略；该链路查不通时再看国内链路。
+        探测域名的路由不代表已经验证了米游社请求的实际路由。
         """
         if self.blocked:
             return False
@@ -142,18 +142,22 @@ class LinkReport:
         return None
 
     @property
+    def location(self) -> IpLocation:
+        """与整体判定对应的可展示结果，不能把成功的备用查询显示成未知。"""
+        for location in (self.overseas, self.domestic):
+            if location.ok and location.mainland is False:
+                return location
+        return self.overseas if self.overseas.ok else self.domestic
+
+    @property
     def reason(self) -> str:
         """给日志/推送用的一句话说明。"""
         if self.split:
             return (
-                f"国内直连 {self.domestic.label}，"
-                f"境外链路 {self.overseas.label}（分流代理，境外流量已走代理）"
+                f"国内链路 {self.domestic.label}，"
+                f"境外链路 {self.overseas.label}（两条探测链路的出口不同）"
             )
-        if self.blocked:
-            for location in (self.overseas, self.domestic):
-                if location.ok and location.mainland is False:
-                    return f"当前出口 {location.label}"
-        return f"当前出口 {self.domestic.label or self.overseas.label}"
+        return f"当前出口 {self.location.label}"
 
     @property
     def proxy(self) -> str:
@@ -167,9 +171,11 @@ class LinkReport:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            **self.domestic.to_dict(),
+            **self.location.to_dict(),
             "domestic": self.domestic.to_dict(),
             "overseas": self.overseas.to_dict(),
+            "proxy": self.proxy,
+            "error": self.error,
             "split": self.split,
             "blocked": self.blocked,
             "mainland": self.mainland,

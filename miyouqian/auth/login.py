@@ -9,11 +9,12 @@ import os
 import pathlib
 import threading
 import time
-from typing import Any
+from typing import Any, Callable, Iterable
 
 from .. import constants as c
 from ..core import cookies, crypto
 from ..core.http import ApiClient
+from . import webcookie
 
 
 class _QrRefreshed(Exception):
@@ -79,46 +80,57 @@ class PassportLogin:
         self.device_model = device_model
         self.device_name = device_name
 
-    def get_additional_tokens(self, stoken: str, mid: str) -> dict[str, str]:
-        ltoken = self._get_ltoken(stoken, mid)
-        cookie_token = self._get_cookie_token(stoken, mid)
-        return {"ltoken": ltoken, "cookie_token": cookie_token}
+    def get_additional_tokens(self, stoken: str, mid: str, stuid: str = "") -> dict[str, str]:
+        ltoken = ""
+        try:
+            ltoken = self._get_ltoken(stoken, mid, stuid)
+            if not ltoken:
+                raise RuntimeError("stoken 换 ltoken 失败: 接口未返回有效凭证，原账号凭证未更新")
+            cookie_token = self._get_cookie_token(stoken, mid, stuid)
+            if not cookie_token:
+                raise RuntimeError("stoken 换 cookie_token 失败: 接口未返回有效凭证，原账号凭证未更新")
+            return {"ltoken": ltoken, "cookie_token": cookie_token}
+        except Exception as exc:
+            message = _redact_values(str(exc), (stoken, mid, stuid, ltoken))
+            if type(exc) is not RuntimeError:
+                message = f"{type(exc).__name__}: {message}"
+            raise RuntimeError(message) from None
 
-    def _passport_headers(self, stoken: str, mid: str) -> dict[str, str]:
+    def _passport_headers(self, stoken: str, mid: str, stuid: str = "") -> dict[str, str]:
+        # v2 stoken 的标准写法是 stuid + stoken + mid 三项都带
+        cookie = f"stuid={stuid};stoken={stoken};mid={mid}" if stuid else f"mid={mid};stoken={stoken}"
         return {
             "user-agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) miHoYoBBS/{c.BBS_VERSION}",
             "x-rpc-app_version": c.BBS_VERSION,
+            "x-rpc-app_id": c.PASSPORT_APP_ID,
             "x-rpc-client_type": "5",
             "x-requested-with": "com.mihoyo.hyperion",
             "referer": "https://webstatic.mihoyo.com",
             "x-rpc-device_id": self.device_id,
             "x-rpc-device_fp": self.device_fp,
-            "cookie": f"mid={mid};stoken={stoken}",
+            "ds": crypto.ds_passport_auth(),
+            "cookie": cookie,
         }
 
-    def _get_ltoken(self, stoken: str, mid: str) -> str:
-        headers = self._passport_headers(stoken, mid)
-        headers["ds"] = crypto.ds_x4(query=f"stoken={stoken}")
+    def _get_ltoken(self, stoken: str, mid: str, stuid: str = "") -> str:
+        headers = self._passport_headers(stoken, mid, stuid)
         data = self.client.get_json(
             c.LTOKEN_BY_STOKEN_URL,
             headers=headers,
-            params={"stoken": stoken},
         )
         ensure_ok(data, "stoken 换 ltoken 失败")
-        return str((data.get("data") or {}).get("ltoken") or "")
+        return _response_token(data, "ltoken")
 
-    def _get_cookie_token(self, stoken: str, mid: str) -> str:
-        headers = self._passport_headers(stoken, mid)
-        headers["ds"] = crypto.ds_x4(query=f"stoken={stoken}")
+    def _get_cookie_token(self, stoken: str, mid: str, stuid: str = "") -> str:
+        headers = self._passport_headers(stoken, mid, stuid)
         headers["x-rpc-client_type"] = "2"
         headers["x-rpc-aigis"] = ""
         data = self.client.get_json(
             c.COOKIE_TOKEN_BY_STOKEN_URL,
             headers=headers,
-            params={"stoken": stoken},
         )
         ensure_ok(data, "stoken 换 cookie_token 失败")
-        return str((data.get("data") or {}).get("cookie_token") or "")
+        return _response_token(data, "cookie_token")
 
 
 class QRLogin(PassportLogin):
@@ -280,21 +292,62 @@ def print_qrcode(text: str, image_path: pathlib.Path | None = None) -> None:
         qrcode.make(text).save(image_path)
 
 
-def refresh_cookie_token(client: ApiClient, account: dict[str, Any]) -> bool:
+def _response_token(data: dict[str, Any], field: str) -> str:
+    payload = data.get("data")
+    token = payload.get(field) if isinstance(payload, dict) else None
+    return token.strip() if isinstance(token, str) else ""
+
+
+def _redact_account_values(message: str, account: dict[str, Any]) -> str:
+    """接口文案也不应带出请求中的账号凭证。"""
+    values = [str(account.get(key) or "") for key in
+              ("cookie", "stuid", "stoken", "mid", "ltoken", "cookie_token")]
+    for item in str(account.get("cookie") or "").split(";"):
+        if "=" in item:
+            values.append(item.split("=", 1)[1].strip())
+    return _redact_values(message, values)
+
+
+def _redact_values(message: str, values: Iterable[str]) -> str:
+    for value in sorted({str(item) for item in values if item}, key=len, reverse=True):
+        if len(value) >= 4:
+            message = message.replace(value, "[已脱敏]")
+    return message[:600]
+
+
+def refresh_cookie_token(
+    client: ApiClient,
+    account: dict[str, Any],
+    *,
+    device: dict[str, Any] | None = None,
+    on_error: Callable[[str], None] | None = None,
+) -> bool:
+    """用 stoken 重新换一套网页登录 Cookie（ltoken_v2 / cookie_token_v2 等），成功后才更新 Cookie。
+
+    函数名保留供现有任务调用。2026-11-20 起 passport 的 stoken 换证接口不再可用（1002 / -464），
+    改走网页端扫码登录，由账号自己的 stoken 确认，见 auth/webcookie.py。client 参数保留兼容，不再使用。
+    """
     try:
-        data = client.get_json(
-            c.COOKIE_TOKEN_REFRESH_URL,
-            headers={"cookie": cookies.stoken_cookie(account), "user-agent": c.DEFAULT_MOBILE_UA},
-        )
-        ensure_ok(data, "刷新 cookie_token 失败")
-    except Exception:
+        cookies.stoken_cookie(account)
+    except (TypeError, ValueError):
+        if on_error:
+            on_error("刷新网页凭证失败: 缺少有效的 stuid/stoken/mid，请重新登录")
         return False
-    token = str((data.get("data") or {}).get("cookie_token") or "")
-    if not token:
+    raw_cookie = str(account.get("cookie") or "")
+    uid = str(account.get("stuid") or cookies.guess_uid(raw_cookie))
+    mid = str(account.get("mid") or cookies.guess_mid(raw_cookie))
+    try:
+        web = webcookie.fetch_web_cookies(uid, str(account["stoken"]), mid, device or {})
+    except Exception as exc:
+        detail = str(exc) if isinstance(exc, webcookie.WebCookieError) else f"网络或接口请求异常（{type(exc).__name__}）"
+        if on_error:
+            on_error("自动续期失败: " + _redact_account_values(detail, account))
         return False
-    account["cookie"] = cookies.replace_or_append_cookie_value(
-        str(account.get("cookie") or ""), "cookie_token", token
-    )
+    cookie = raw_cookie
+    for part in webcookie.build_cookie_header(web, uid, mid).split("; "):
+        key, value = part.split("=", 1)
+        cookie = cookies.replace_or_append_cookie_value(cookie, key, value)
+    account["cookie"] = cookie
     return True
 
 

@@ -436,6 +436,81 @@ await check("草稿登录按唯一草稿 ID 回填，删除、重排或缺失身
   }
 });
 
+await check("打开小号登录面板不会重放大号上一次的登录成功状态", async () => {
+  const toasts = [];
+  const node = { textContent: "", disabled: false, querySelector: () => null };
+  const c = context(["showLoginMethods", "refreshStatus"], {
+    config: { accounts: [{ name: "大号" }, { name: "小号" }] },
+    lastLoginStatus: "success",
+    activeLoginIndex: null,
+    localLoginPanel: null,
+    configEditVersion: 0,
+    hasPendingConfigEdits: () => false,
+    api: async () => ({
+      scheduler: {}, exchange_scheduler: {}, logs: [],
+      login: { running: false, status: "success", account_index: 0, message: "账号 大号 登录成功" },
+    }),
+    collectConfig() {}, clearLoginCountdown() {},
+    renderLoginSlot() {}, updateLogs() {},
+    showToast: (message) => toasts.push(message),
+    loadConfig: async () => {},
+    formatTime: () => "", latestResultText: () => "",
+    document: { querySelectorAll: () => [] },
+    $: () => node,
+  });
+
+  await c.showLoginMethods(1);
+  await c.refreshStatus();
+
+  assert.equal(c.localLoginPanel.account_index, 1);
+  assert.deepEqual(toasts, []);
+  assert.equal(c.lastLoginStatus, "success");
+});
+
+await check("小号扫码请求完成前的状态轮询忽略大号旧成功，随后处理小号新结果", async () => {
+  const startRequest = deferred();
+  const toasts = [];
+  const node = { textContent: "", disabled: false, querySelector: () => null };
+  let statusCount = 0;
+  const c = context(["startLogin", "refreshStatus", "stripClientAccount"], {
+    config: { accounts: [{ name: "大号" }, { name: "小号" }] },
+    lastLoginStatus: "success",
+    activeLoginIndex: null,
+    localLoginPanel: { account_index: 1, mode: "methods" },
+    configEditVersion: 0,
+    hasPendingConfigEdits: () => false,
+    api: async (url) => {
+      if (url === "/api/login/start") return startRequest.promise;
+      statusCount += 1;
+      const isOld = statusCount === 1;
+      return {
+        scheduler: {}, exchange_scheduler: {}, logs: [],
+        login: {
+          running: false, status: "success", account_index: isOld ? 0 : 1,
+          message: isOld ? "账号 大号 登录成功" : "账号 小号 登录成功",
+        },
+      };
+    },
+    collectConfig() {}, clearLoginCountdown() {},
+    renderLoginSlot() {}, updateLogs() {},
+    showToast: (message) => toasts.push(message),
+    loadConfig: async () => {},
+    formatTime: () => "", latestResultText: () => "",
+    document: { querySelectorAll: () => [] },
+    $: () => node,
+  });
+
+  const starting = c.startLogin(1);
+  await tick();
+  await c.refreshStatus();
+  assert.deepEqual(toasts, []);
+  assert.equal(c.lastLoginStatus, "success");
+
+  startRequest.resolve({ ok: true });
+  await starting;
+  assert.deepEqual(toasts, ["登录流程已启动", "账号 小号 登录成功"]);
+});
+
 await check("草稿身份随表单采集保留，仅登录请求携带，保存配置时移除", () => {
   let seq = 0;
   const c = context(["emptyAccount", "emptyAccountCloudGames", "stripClientAccount", "serverConfig", "collectConfig", "collectChipSelection"], {

@@ -28,6 +28,8 @@ class BbsTasks:
         self.bbs_config = config.get("bbs", {})
         self.device = config["device"]
         self.emit = emit
+        self._refresh_failure = ""
+        self._refresh_attempted = False
 
     def run(self) -> list[str]:
         messages: list[str] = []
@@ -39,6 +41,8 @@ class BbsTasks:
         state = self._task_state()
         if not state:
             self._add(messages, "任务状态获取失败，请检查 cookie/stoken")
+            if self._refresh_failure:
+                self._add(messages, f"凭证自动刷新失败：{self._refresh_failure}")
             return messages
         can_get = int(state.get("can_get_points") or 0)
         received = int(state.get("already_received_points") or 0)
@@ -90,7 +94,14 @@ class BbsTasks:
                 if self.bbs_config.get(flag, True) and task_flags[flag]:
                     skipped.append(f"{label}已完成")
                     self._add(messages, f"{label}任务已完成，跳过")
-        state = self._task_state() or state
+        final_state = self._task_state()
+        if final_state:
+            state = final_state
+        else:
+            failed.append("获取任务最终状态失败")
+            self._add(messages, "社区任务最终状态获取失败，本轮按失败处理")
+            if self._refresh_failure:
+                self._add(messages, f"凭证自动刷新失败：{self._refresh_failure}")
         final_received = int(state.get("already_received_points") or received)
         final_can_get = max(possible_today - final_received, 0)
         final_total = int(state.get("total_points") or total)
@@ -154,9 +165,12 @@ class BbsTasks:
             params={"point_sn": "myb"},
             headers=self._web_headers(),
         )
-        if data.get("retcode") == -100 and not retried:
-            if refresh_cookie_token(self.client, self.account):
+        if data.get("retcode") in (-100, -101) and not retried and not self._refresh_attempted:
+            self._refresh_attempted = True
+            errors: list[str] = []
+            if refresh_cookie_token(self.client, self.account, device=self.device, on_error=errors.append):
                 return self._task_state(retried=True)
+            self._refresh_failure = "；".join(errors)
         return data.get("data", {}) if data.get("retcode") == 0 else {}
 
     def _task_flags(self, state: dict[str, Any]) -> dict[str, Any]:
